@@ -135,7 +135,7 @@ _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int3
 
 # Jog speeds (steps/s)
 _joint_max_jog_speed: Vec6i = np.array(
-    [1500, 3000, 3600, 7000, 7000, 18000], dtype=np.int32
+    [5200, 14400, 16000, 16000, 17600, 22000], dtype=np.int32
 )
 _joint_min_jog_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
@@ -147,17 +147,17 @@ _joint_min_acc_rad: float = float(100)
 _joint_max_jerk: Vec6i = np.array([1600, 1000, 1100, 3000, 3000, 2000], dtype=np.int32)
 
 # Cartesian limits
-_cart_linear_velocity_min_JOG: float = 0.002
-_cart_linear_velocity_max_JOG: float = 0.06
+_cart_linear_velocity_min_JOG: float = 0.004
+_cart_linear_velocity_max_JOG: float = 0.15  # 150mm/s
 
-_cart_linear_velocity_min: float = 0.002
-_cart_linear_velocity_max: float = 0.06
+_cart_linear_velocity_min: float = 0.004
+_cart_linear_velocity_max: float = 0.15  # 150mm/s
 
 _cart_linear_acc_min: float = 0.002
-_cart_linear_acc_max: float = 0.06
+_cart_linear_acc_max: float = 0.3
 
 _cart_angular_velocity_min: float = 0.7  # deg/s
-_cart_angular_velocity_max: float = 25.0  # deg/s
+_cart_angular_velocity_max: float = 60.0  # deg/s
 
 # Standby positions
 _standby_deg: Vec6f = np.array([90.0, -90.0, 180.0, 0.0, 0.0, 180.0], dtype=np.float64)
@@ -180,12 +180,13 @@ def _apply_ratio(values: NDArray, idx: IndexArg) -> NDArray:
 
 
 def deg_to_steps(deg: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
-    """Degrees to steps (gear ratio aware). Fast scalar path when idx is int."""
+    """Degrees to steps (gear ratio aware). Fast scalar path when idx is int.
+    """
     if isinstance(idx, (int, np.integer)) and np.isscalar(deg):
-        return np.int32((deg / degree_per_step_constant) * _joint_ratio[idx])  # type: ignore
+        return np.int32(np.rint((deg / degree_per_step_constant) * _joint_ratio[idx]))  # type: ignore
     deg_arr = np.asarray(deg, dtype=np.float64)
     steps_f = _apply_ratio(deg_arr / degree_per_step_constant, idx)
-    return steps_f.astype(np.int32, copy=False)
+    return np.rint(steps_f).astype(np.int32, copy=False)
 
 
 def steps_to_deg(
@@ -200,9 +201,10 @@ def steps_to_deg(
 
 
 def rad_to_steps(rad: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
-    """Radians to steps. Fast scalar path when idx is int."""
+    """Radians to steps. Fast scalar path when idx is int.
+    """
     if isinstance(idx, (int, np.integer)) and np.isscalar(rad):
-        return np.int32((rad / radian_per_step_constant) * _joint_ratio[idx])  # type: ignore
+        return np.int32(np.rint((rad / radian_per_step_constant) * _joint_ratio[idx]))  # type: ignore
     rad_arr = np.asarray(rad, dtype=np.float64)
     deg_arr = np.rad2deg(rad_arr)
     return deg_to_steps(deg_arr, idx)
