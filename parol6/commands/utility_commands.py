@@ -54,6 +54,27 @@ class DelayCommand(CommandBase):
             self.start_timer(self.duration)
             logger.info(f"  -> Delay starting for {self.duration} seconds...")
 
+    def tick(self, state: "ControllerState") -> ExecutionStatus:
+        """
+        Template-method wrapper that centralizes lifecycle/error handling.
+        """
+        if self.is_finished or not self.is_valid:
+            return (
+                ExecutionStatus.completed("Already finished")
+                if self.is_finished
+                else ExecutionStatus.failed("Invalid command")
+            )
+        try:
+            status = self.execute_step(state)
+        except Exception as e:
+            self.is_valid = False
+            self.error_state = True
+            self.error_message = str(e)
+            self.is_finished = True
+            logger.error(f"[DelayCommand] Execution error: {e}")
+            return ExecutionStatus.failed("Execution error", error=e)
+        return status
+
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """
         Keep the robot idle during the delay and report status via ExecutionStatus.
