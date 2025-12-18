@@ -341,7 +341,7 @@ def manage_server(
     )
 
     # Block until PING responds or timeout
-    deadline = time.time() + 5.0
+    deadline = time.time() + 10.0
     while time.time() < deadline:
         try:
             if is_server_running(host=host, port=port, timeout=0.2):

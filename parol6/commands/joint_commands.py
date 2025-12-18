@@ -51,8 +51,8 @@ class MoveJointCommand(MotionCommand):
         """
         Parse MOVEJOINT command parameters.
 
-        Format: MOVEJOINT|j1|j2|j3|j4|j5|j6|duration|speed
-        Example: MOVEJOINT|0|45|90|-45|30|0|None|50
+        Format: MOVEJOINT|j1|j2|j3|j4|j5|j6|duration|speed|accel
+        Example: MOVEJOINT|0|45|90|-45|30|0|None|50|50
 
         Args:
             parts: Pre-split message parts
@@ -60,10 +60,10 @@ class MoveJointCommand(MotionCommand):
         Returns:
             Tuple of (can_handle, error_message)
         """
-        if len(parts) != 9:
+        if len(parts) != 10:
             return (
                 False,
-                "MOVEJOINT requires 8 parameters: 6 joint angles, duration, speed",
+                "MOVEJOINT requires 9 parameters: 6 joint angles, duration, speed, accel",
             )
 
         # Parse joint angles
@@ -75,6 +75,9 @@ class MoveJointCommand(MotionCommand):
         self.duration = None if parts[7].upper() == "NONE" else float(parts[7])
         self.velocity_percent = None if parts[8].upper() == "NONE" else float(parts[8])
 
+        # Parse acceleration
+        self.accel_percent = float(parts[9]) if parts[9].upper() != "NONE" else DEFAULT_ACCEL_PERCENT
+
         # Validate joint limits
         self.target_radians = np.deg2rad(self.target_angles)
         for i in range(6):
@@ -85,7 +88,7 @@ class MoveJointCommand(MotionCommand):
                     f"Joint {i + 1} target ({self.target_angles[i]} deg) is out of range",
                 )
 
-        self.log_debug("Parsed MoveJoint: %s", self.target_angles)
+        self.log_debug("Parsed MoveJoint: %s, accel=%s%%", self.target_angles, self.accel_percent)
         self.is_valid = True
         return (True, None)
 

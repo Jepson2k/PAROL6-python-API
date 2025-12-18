@@ -91,6 +91,12 @@ class SendResult(TypedDict):
     completed: bool
     ack_time: datetime | None
 
+class PingResult(TypedDict):
+    """Parsed PING response."""
+
+    serial_connected: bool
+    raw: str  # Original response for debugging
+
 
 class WireResponse(TypedDict):
     """Typed wrapper for parsed wire responses."""

@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal, TypeVar
 
-from ..protocol.types import Axis, Frame, StatusAggregate
+from ..protocol.types import Axis, Frame, PingResult, StatusAggregate
 from .async_client import AsyncRobotClient
 
 T = TypeVar("T")
@@ -160,7 +160,7 @@ class RobotClient:
         return _run(self._inner.set_serial_port(port_str))
 
     # ---------- status / queries ----------
-    def ping(self) -> str | None:
+    def ping(self) -> PingResult | None:
         return _run(self._inner.ping())
 
     def get_angles(self) -> list[float] | None:
@@ -295,8 +295,6 @@ class RobotClient:
         duration: float | None = None,
         speed_percentage: int | None = None,
         accel_percentage: int | None = None,
-        profile: str | None = None,
-        tracking: str | None = None,
     ) -> bool:
         return _run(
             self._inner.move_joints(
@@ -304,8 +302,6 @@ class RobotClient:
                 duration,
                 speed_percentage,
                 accel_percentage,
-                profile,
-                tracking,
             )
         )
 
@@ -315,8 +311,6 @@ class RobotClient:
         duration: float | None = None,
         speed_percentage: int | None = None,
         accel_percentage: int | None = None,
-        profile: str | None = None,
-        tracking: str | None = None,
     ) -> bool:
         return _run(
             self._inner.move_pose(
@@ -324,8 +318,6 @@ class RobotClient:
                 duration,
                 speed_percentage,
                 accel_percentage,
-                profile,
-                tracking,
             )
         )
 
@@ -335,8 +327,6 @@ class RobotClient:
         duration: float | None = None,
         speed_percentage: float | None = None,
         accel_percentage: int | None = None,
-        profile: str | None = None,
-        tracking: str | None = None,
     ) -> bool:
         return _run(
             self._inner.move_cartesian(
@@ -344,8 +334,6 @@ class RobotClient:
                 duration,
                 speed_percentage,
                 accel_percentage,
-                profile,
-                tracking,
             )
         )
 

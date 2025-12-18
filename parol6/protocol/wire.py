@@ -14,7 +14,7 @@ from typing import Literal, cast
 
 import numpy as np
 
-from .types import Axis, Frame, StatusAggregate
+from .types import Axis, Frame, PingResult, StatusAggregate
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ __all__ = [
     "encode_cart_jog",
     "encode_gcode",
     "encode_gcode_program_inline",
+    "decode_ping",
     "decode_simple",
     "decode_status",
     "split_to_3_bytes",
@@ -324,40 +325,43 @@ def encode_move_joint(
     angles: Sequence[float],
     duration: float | None,
     speed: float | None,
+    accel: float | None = None,
 ) -> str:
     """
-    MOVEJOINT|j1|j2|j3|j4|j5|j6|DUR|SPD
-    Use "NONE" for omitted duration/speed.
+    MOVEJOINT|j1|j2|j3|j4|j5|j6|DUR|SPD|ACC
+    Use "NONE" for omitted duration/speed/accel.
     Note: Validation (requiring one of duration/speed) is left to caller.
     """
     angles_str = "|".join(str(a) for a in angles)
-    return f"MOVEJOINT|{angles_str}|{_opt(duration)}|{_opt(speed)}"
+    return f"MOVEJOINT|{angles_str}|{_opt(duration)}|{_opt(speed)}|{_opt(accel)}"
 
 
 def encode_move_pose(
     pose: Sequence[float],
     duration: float | None,
     speed: float | None,
+    accel: float | None = None,
 ) -> str:
     """
-    MOVEPOSE|x|y|z|rx|ry|rz|DUR|SPD
-    Use "NONE" for omitted duration/speed.
+    MOVEPOSE|x|y|z|rx|ry|rz|DUR|SPD|ACC
+    Use "NONE" for omitted duration/speed/accel.
     """
     pose_str = "|".join(str(v) for v in pose)
-    return f"MOVEPOSE|{pose_str}|{_opt(duration)}|{_opt(speed)}"
+    return f"MOVEPOSE|{pose_str}|{_opt(duration)}|{_opt(speed)}|{_opt(accel)}"
 
 
 def encode_move_cartesian(
     pose: Sequence[float],
     duration: float | None,
     speed: float | None,
+    accel: float | None = None,
 ) -> str:
     """
-    MOVECART|x|y|z|rx|ry|rz|DUR|SPD
-    Use "NONE" for omitted duration/speed.
+    MOVECART|x|y|z|rx|ry|rz|DUR|SPD|ACC
+    Use "NONE" for omitted duration/speed/accel.
     """
     pose_str = "|".join(str(v) for v in pose)
-    return f"MOVECART|{pose_str}|{_opt(duration)}|{_opt(speed)}"
+    return f"MOVECART|{pose_str}|{_opt(duration)}|{_opt(speed)}|{_opt(accel)}"
 
 
 def encode_move_cartesian_rel_trf(
@@ -426,6 +430,24 @@ def encode_gcode_program_inline(lines: Sequence[str]) -> str:
 # =========================
 # Decoding helpers
 # =========================
+def decode_ping(resp: str) -> PingResult | None:
+    """Parse PONG response: 'PONG|SERIAL=1' -> PingResult.
+
+    Args:
+        resp: Raw ping response string (e.g., 'PONG|SERIAL=1')
+
+    Returns:
+        PingResult with serial_connected status, or None if invalid response
+    """
+    if not resp or not resp.startswith("PONG"):
+        return None
+    serial_connected = False
+    if "SERIAL=" in resp:
+        serial_part = resp.split("SERIAL=", 1)[-1].split("|")[0].strip()
+        serial_connected = serial_part.startswith("1")
+    return {"serial_connected": serial_connected, "raw": resp}
+
+
 def decode_simple(
     resp: str, expected_prefix: Literal["ANGLES", "IO", "GRIPPER", "SPEEDS", "POSE"]
 ) -> list[float] | list[int] | None:

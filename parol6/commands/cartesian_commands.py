@@ -11,7 +11,7 @@ import numpy as np
 from spatialmath import SE3
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import DEFAULT_ACCEL_PERCENT, INTERVAL_S, TRACE
+from parol6.config import DEFAULT_ACCEL_PERCENT, INTERVAL_S, TRACE, TRACE_ENABLED
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
@@ -216,8 +216,8 @@ class MovePoseCommand(MotionCommand):
         """
         Parse MOVEPOSE command parameters.
 
-        Format: MOVEPOSE|x|y|z|rx|ry|rz|duration|speed
-        Example: MOVEPOSE|100|200|300|0|0|0|None|50
+        Format: MOVEPOSE|x|y|z|rx|ry|rz|duration|speed|accel|
+        Example: MOVEPOSE|100|200|300|0|0|0|None|50|50
 
         Args:
             parts: Pre-split message parts
@@ -225,10 +225,10 @@ class MovePoseCommand(MotionCommand):
         Returns:
             Tuple of (can_handle, error_message)
         """
-        if len(parts) != 9:
+        if len(parts) != 10:
             return (
                 False,
-                "MOVEPOSE requires 8 parameters: x, y, z, rx, ry, rz, duration, speed",
+                "MOVEPOSE requires 9 parameters: x, y, z, rx, ry, rz, duration, speed, accel",
             )
 
         # Parse pose (6 values)
@@ -238,7 +238,10 @@ class MovePoseCommand(MotionCommand):
         self.duration = None if parts[7].upper() == "NONE" else float(parts[7])
         self.velocity_percent = None if parts[8].upper() == "NONE" else float(parts[8])
 
-        self.log_debug("Parsed MovePose: %s", self.pose)
+        # Parse acceleration
+        self.accel_percent = float(parts[9]) if parts[9].upper() != "NONE" else DEFAULT_ACCEL_PERCENT
+
+        self.log_debug("Parsed MovePose: %s, accel=%s%%", self.pose, self.accel_percent)
         self.is_valid = True
         return (True, None)
 
@@ -341,13 +344,64 @@ class MoveCartCommand(MotionCommand):
     3. Solving Inverse Kinematics for each intermediate step to ensure path validity.
     """
 
+    streamable = True
+
+    # Cartesian acceleration limits (m/s²)
+    CART_LIN_ACC_MIN: float = PAROL6_ROBOT.cart.acc.linear.min
+    CART_LIN_ACC_MAX: float = PAROL6_ROBOT.cart.acc.linear.max
+    # Angular acceleration limits (deg/s²) - derived from linear limits scaled appropriately
+    # Using a reasonable ratio based on typical robot arm kinematics
+    CART_ANG_ACC_MIN: float = 1.0    # deg/s²
+    CART_ANG_ACC_MAX: float = 120.0  # deg/s²
+
+    @staticmethod
+    def _trapezoidal_duration(distance: float, v_max: float, a_max: float) -> float:
+        """
+        Calculate the duration for a trapezoidal velocity profile move.
+
+        For a move where max velocity is reached (long moves):
+            t = distance/v_max + v_max/a_max
+
+        For short moves where max velocity isn't reached (triangular profile):
+            t = 2 * sqrt(distance/a_max)
+
+        Args:
+            distance: Total distance to travel (positive)
+            v_max: Maximum velocity (must be positive)
+            a_max: Maximum acceleration (must be positive)
+
+        Returns:
+            Duration in seconds for the move
+        """
+        if distance <= 0 or v_max <= 0 or a_max <= 0:
+            return 0.0
+
+        # Distance needed to reach v_max and decelerate back to 0
+        # (triangular profile distance = v_max^2 / a_max)
+        d_accel = (v_max * v_max) / a_max
+
+        if distance >= d_accel:
+            # Long move: trapezoid profile (accel + cruise + decel)
+            # Time = accel_time + cruise_time + decel_time
+            # accel_time = decel_time = v_max / a_max
+            # cruise_time = (distance - d_accel) / v_max
+            t_accel = v_max / a_max
+            t_cruise = (distance - d_accel) / v_max
+            return 2 * t_accel + t_cruise
+        else:
+            # Short move: triangular profile (never reaches v_max)
+            # t = 2 * sqrt(distance / a_max)
+            return 2.0 * np.sqrt(distance / a_max)
+
     __slots__ = (
         "pose",
         "duration",
         "velocity_percent",
+        "accel_percent",
         "start_time",
         "initial_pose",
         "target_pose",
+        "_s_offset",
     )
 
     def __init__(self):
@@ -357,18 +411,20 @@ class MoveCartCommand(MotionCommand):
         self.pose = None
         self.duration = None
         self.velocity_percent = None
+        self.accel_percent = DEFAULT_ACCEL_PERCENT
 
         # Runtime state
         self.start_time = None
         self.initial_pose = None
         self.target_pose = None
+        self._s_offset = 0.0  # Progress offset for streaming (phase-preserving quintic)
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
         """
         Parse MOVECART command parameters.
 
-        Format: MOVECART|x|y|z|rx|ry|rz|duration|speed
-        Example: MOVECART|100|200|300|0|0|0|2.0|None
+        Format: MOVECART|x|y|z|rx|ry|rz|duration|speed|accel
+        Example: MOVECART|100|200|300|0|0|0|2.0|None|50
 
         Args:
             parts: Pre-split message parts
@@ -376,10 +432,10 @@ class MoveCartCommand(MotionCommand):
         Returns:
             Tuple of (can_handle, error_message)
         """
-        if len(parts) != 9:
+        if len(parts) != 10:
             return (
                 False,
-                "MOVECART requires 8 parameters: x, y, z, rx, ry, rz, duration, speed",
+                "MOVECART requires 9 parameters: x, y, z, rx, ry, rz, duration, speed, accel",
             )
 
         # Parse pose (6 values)
@@ -388,6 +444,9 @@ class MoveCartCommand(MotionCommand):
         # Parse duration and speed
         self.duration = None if parts[7].upper() == "NONE" else float(parts[7])
         self.velocity_percent = None if parts[8].upper() == "NONE" else float(parts[8])
+
+        # Parse acceleration
+        self.accel_percent = float(parts[9]) if parts[9].upper() != "NONE" else DEFAULT_ACCEL_PERCENT
 
         # Validate that at least one timing parameter is given
         if self.duration is None and self.velocity_percent is None:
@@ -399,64 +458,160 @@ class MoveCartCommand(MotionCommand):
             )
             self.velocity_percent = None  # Prioritize duration
 
-        self.log_debug("Parsed MoveCart: %s", self.pose)
+        self.log_debug("Parsed MoveCart: %s, accel=%s%%", self.pose, self.accel_percent)
         self.is_valid = True
         return (True, None)
 
     def do_setup(self, state: "ControllerState") -> None:
-        """Captures the initial state and validates the path just before execution."""
-        self.initial_pose = get_fkine_se3()
+        """Captures the initial state and validates the path just before execution.
+
+        In stream mode, when called on an in-progress command, blends smoothly
+        to the new target instead of restarting the trajectory.
+        """
         pose = cast(list[float], self.pose)
 
-        # Construct pose: rotation first, then set translation (xyz convention)
-        self.target_pose = SE3.RPY(pose[3:6], unit="deg", order="xyz")
-        self.target_pose.t = (
-            np.array(pose[:3]) / 1000.0
-        )  # Vectorized translation assignment
+        # Construct new target pose: rotation first, then set translation (xyz convention)
+        new_target = SE3.RPY(pose[3:6], unit="deg", order="xyz")
+        new_target.t = np.array(pose[:3]) / 1000.0
 
-        if self.velocity_percent is not None:
-            # Calculate the total distance for translation and rotation
-            tp = cast(SE3, self.target_pose)
-            ip = cast(SE3, self.initial_pose)
-            linear_distance = np.linalg.norm(tp.t - ip.t)
-            angular_distance_rad = ip.angdist(tp)
+        # Check if this is a stream update (command already in progress)
+        # Only blend when streaming is enabled AND command is mid-execution
+        # _t0 is set on first execute_step, so if it's set we're mid-execution
+        is_stream_update = (
+            state.stream_mode  # Only blend when streaming is enabled
+            and self._t0 is not None
+            and self.initial_pose is not None
+            and self.target_pose is not None
+            and not self.is_finished
+        )
 
-            target_linear_speed = self.linmap_pct(
-                self.velocity_percent, self.CART_LIN_JOG_MIN, self.CART_LIN_JOG_MAX
-            )
-            target_angular_speed_rad = np.deg2rad(
-                self.linmap_pct(
+        if is_stream_update:
+            # BLEND MODE: Update target while maintaining smooth motion
+            # Get current interpolated position as new starting point
+            dur = float(self.duration or 0.0)
+            if dur > 0:
+                s = self.progress01(dur)
+                s_scaled = quintic_scaling(float(s))
+                current_interp = cast(SE3, self.initial_pose).interp(
+                    cast(SE3, self.target_pose), s_scaled
+                )
+                self.initial_pose = current_interp
+            else:
+                # No duration yet, use current FK position
+                self.initial_pose = get_fkine_se3()
+
+            # Update target to new destination
+            self.target_pose = new_target
+
+            # Recalculate duration for new distance if using velocity_percent
+            if self.velocity_percent is not None:
+                tp = cast(SE3, self.target_pose)
+                ip = cast(SE3, self.initial_pose)
+                linear_distance = float(np.linalg.norm(tp.t - ip.t))
+                angular_distance_rad = float(ip.angdist(tp))
+                angular_distance_deg = np.rad2deg(angular_distance_rad)
+
+                target_linear_speed = self.linmap_pct(
+                    self.velocity_percent, self.CART_LIN_JOG_MIN, self.CART_LIN_JOG_MAX
+                )
+                target_angular_speed_deg = self.linmap_pct(
                     self.velocity_percent, self.CART_ANG_JOG_MIN, self.CART_ANG_JOG_MAX
                 )
-            )
 
-            # Calculate time required for each component of the movement
-            time_linear = (
-                linear_distance / target_linear_speed if target_linear_speed > 0 else 0
-            )
-            time_angular = (
-                angular_distance_rad / target_angular_speed_rad
-                if target_angular_speed_rad > 0
-                else 0
-            )
-
-            # The total duration is the longer of the two times to ensure synchronization
-            calculated_duration = max(time_linear, time_angular)
-
-            if calculated_duration <= 0:
-                logger.info(
-                    "  -> INFO: MoveCart has zero duration. Marking as finished."
+                # Get acceleration from accel_percent
+                target_linear_accel = self.linmap_pct(
+                    self.accel_percent, self.CART_LIN_ACC_MIN, self.CART_LIN_ACC_MAX
                 )
-                self.is_finished = True
-                self.is_valid = True  # It's valid, just already done.
-                return
+                target_angular_accel_deg = self.linmap_pct(
+                    self.accel_percent, self.CART_ANG_ACC_MIN, self.CART_ANG_ACC_MAX
+                )
 
-            self.duration = calculated_duration
-            self.log_debug("  -> Calculated MoveCart duration: %.2fs", self.duration)
+                # Use trapezoidal profile duration (accounts for accel/decel phases)
+                time_linear = self._trapezoidal_duration(
+                    linear_distance, target_linear_speed, target_linear_accel
+                )
+                time_angular = self._trapezoidal_duration(
+                    angular_distance_deg, target_angular_speed_deg, target_angular_accel_deg
+                )
 
-        self.log_debug("  -> Command is valid and ready for execution.")
-        if self.duration and float(self.duration) > 0.0:
-            self.start_timer(float(self.duration))
+                calculated_duration = max(time_linear, time_angular)
+                if calculated_duration <= 0:
+                    # Use minimum duration to keep command alive for streaming updates
+                    # This prevents the "first drag doesn't move" issue where the initial
+                    # target is very close to current position
+                    calculated_duration = 0.05  # 50ms minimum
+
+                self.duration = calculated_duration
+
+            # Phase-preserving quintic: capture current progress and reset timer
+            # This continues from current velocity point on the quintic curve
+            old_dur = float(self.duration or 0.0)
+            if old_dur > 0 and self._t0 is not None:
+                s_old = self.progress01(old_dur)
+                # Cap at 0.5 (coast velocity) - streaming updates keep us accelerating/coasting
+                self._s_offset = min(float(s_old), 0.5)
+            else:
+                self._s_offset = 0.0
+            # Reset timer for new segment - s_offset preserves velocity continuity
+            self._t0 = time.perf_counter()
+
+            # Use TRACE level for stream updates to avoid log flooding at 50Hz
+            if TRACE_ENABLED:
+                logger.log(TRACE, "[%s]   -> Stream blend: updated target, new duration: %.2fs", type(self).__name__, self.duration or 0.0)
+        else:
+            # FRESH START: Original behavior - reset all streaming state
+            self._t0 = None  # Reset timer for fresh start
+            self._s_offset = 0.0  # Reset phase offset
+            self.initial_pose = get_fkine_se3()
+            self.target_pose = new_target
+
+            if self.velocity_percent is not None:
+                # Calculate the total distance for translation and rotation
+                tp = cast(SE3, self.target_pose)
+                ip = cast(SE3, self.initial_pose)
+                linear_distance = float(np.linalg.norm(tp.t - ip.t))
+                angular_distance_rad = float(ip.angdist(tp))
+                angular_distance_deg = np.rad2deg(angular_distance_rad)
+
+                target_linear_speed = self.linmap_pct(
+                    self.velocity_percent, self.CART_LIN_JOG_MIN, self.CART_LIN_JOG_MAX
+                )
+                target_angular_speed_deg = self.linmap_pct(
+                    self.velocity_percent, self.CART_ANG_JOG_MIN, self.CART_ANG_JOG_MAX
+                )
+
+                # Get acceleration from accel_percent
+                target_linear_accel = self.linmap_pct(
+                    self.accel_percent, self.CART_LIN_ACC_MIN, self.CART_LIN_ACC_MAX
+                )
+                target_angular_accel_deg = self.linmap_pct(
+                    self.accel_percent, self.CART_ANG_ACC_MIN, self.CART_ANG_ACC_MAX
+                )
+
+                # Use trapezoidal profile duration (accounts for accel/decel phases)
+                time_linear = self._trapezoidal_duration(
+                    linear_distance, target_linear_speed, target_linear_accel
+                )
+                time_angular = self._trapezoidal_duration(
+                    angular_distance_deg, target_angular_speed_deg, target_angular_accel_deg
+                )
+
+                # The total duration is the longer of the two times to ensure synchronization
+                calculated_duration = max(time_linear, time_angular)
+
+                if calculated_duration <= 0:
+                    # Use minimum duration to keep command alive for streaming updates
+                    # This prevents the "first drag doesn't move" issue where the initial
+                    # target is very close to current position
+                    calculated_duration = 0.05  # 50ms minimum
+                    self.log_debug("  -> Using minimum duration %.3fs for near-zero distance", calculated_duration)
+
+                self.duration = calculated_duration
+                self.log_debug("  -> Calculated MoveCart duration: %.2fs", self.duration)
+
+            self.log_debug("  -> Command is valid and ready for execution.")
+            if self.duration and float(self.duration) > 0.0:
+                self.start_timer(float(self.duration))
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         dur = float(self.duration or 0.0)
@@ -464,7 +619,14 @@ class MoveCartCommand(MotionCommand):
             self.is_finished = True
             self.stop_and_idle(state)
             return ExecutionStatus.completed("MOVECART complete")
-        s = self.progress01(dur)
+        s_raw = self.progress01(dur)
+        # Apply s_offset for streaming (phase-preserving quintic)
+        s_offset = getattr(self, '_s_offset', 0.0)
+        if s_offset > 0:
+            # Map raw progress to continue from where we left off on quintic curve
+            s = s_offset + s_raw * (1.0 - s_offset)
+        else:
+            s = s_raw
         s_scaled = quintic_scaling(float(s))
 
         assert self.initial_pose is not None and self.target_pose is not None

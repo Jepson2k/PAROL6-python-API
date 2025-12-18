@@ -18,7 +18,7 @@ from .. import config as cfg
 from ..ack_policy import QUERY_COMMANDS, SYSTEM_COMMANDS, AckPolicy
 from ..client.status_subscriber import subscribe_status
 from ..protocol import wire
-from ..protocol.types import Axis, Frame, StatusAggregate
+from ..protocol.types import Axis, Frame, PingResult, StatusAggregate
 
 logger = logging.getLogger(__name__)
 
@@ -373,9 +373,16 @@ class AsyncRobotClient:
         return await self._send(f"SET_PORT|{port_str}")
 
     # --------------- Status / Queries ---------------
-    async def ping(self) -> str | None:
-        """Return raw 'PONG|...' text (e.g., 'PONG|SERIAL=1') or None on timeout."""
-        return await self._request("PING", bufsize=256)
+    async def ping(self) -> PingResult | None:
+        """Return parsed ping result with serial_connected status.
+
+        Returns:
+            PingResult with serial_connected bool and raw response, or None on timeout.
+        """
+        resp = await self._request("PING", bufsize=256)
+        if not resp:
+            return None
+        return wire.decode_ping(resp)
 
     async def get_angles(self) -> list[float] | None:
         resp = await self._request("GET_ANGLES", bufsize=1024)
@@ -627,11 +634,19 @@ class AsyncRobotClient:
     async def wait_for_server_ready(
         self, timeout: float = 5.0, interval: float = 0.05
     ) -> bool:
-        """Poll ping() until server responds or timeout."""
+        """Poll ping() until server responds or timeout.
+
+        Args:
+            timeout: Maximum time to wait for server to respond
+            interval: Polling interval between ping attempts
+
+        Returns:
+            True if server responded to PING, False on timeout
+        """
         end_time = time.time() + timeout
         while time.time() < end_time:
-            ok = await self.ping()
-            if ok:
+            result = await self.ping()
+            if result:
                 return True
             await asyncio.sleep(interval)
         return False
@@ -686,15 +701,13 @@ class AsyncRobotClient:
         joint_angles: list[float],
         duration: float | None = None,
         speed_percentage: int | None = None,
-        accel_percentage: int | None = None,  # accepted but not sent
-        profile: str | None = None,  # accepted but not sent
-        tracking: str | None = None,  # accepted but not sent
+        accel_percentage: int | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
             raise RuntimeError(
                 "You must provide either a duration or a speed_percentage."
             )
-        message = wire.encode_move_joint(joint_angles, duration, speed_percentage)
+        message = wire.encode_move_joint(joint_angles, duration, speed_percentage, accel_percentage)
         return await self._send(message)
 
     async def move_pose(
@@ -703,14 +716,12 @@ class AsyncRobotClient:
         duration: float | None = None,
         speed_percentage: int | None = None,
         accel_percentage: int | None = None,
-        profile: str | None = None,
-        tracking: str | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
             raise RuntimeError(
                 "You must provide either a duration or a speed_percentage."
             )
-        message = wire.encode_move_pose(pose, duration, speed_percentage)
+        message = wire.encode_move_pose(pose, duration, speed_percentage, accel_percentage)
         return await self._send(message)
 
     async def move_cartesian(
@@ -718,15 +729,13 @@ class AsyncRobotClient:
         pose: list[float],
         duration: float | None = None,
         speed_percentage: float | None = None,
-        accel_percentage: int | None = None,
-        profile: str | None = None,
-        tracking: str | None = None,
+        accel_percentage: float | None = None,
     ) -> bool:
         if duration is None and speed_percentage is None:
             raise RuntimeError(
-                "Error: You must provide either a duration or a speed_percentage."
+                "You must provide either a duration or a speed_percentage."
             )
-        message = wire.encode_move_cartesian(pose, duration, speed_percentage)
+        message = wire.encode_move_cartesian(pose, duration, speed_percentage, accel_percentage)
         return await self._send(message)
 
     async def move_cartesian_rel_trf(
