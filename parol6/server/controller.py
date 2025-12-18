@@ -603,7 +603,7 @@ class Controller:
                     )
                 except Exception:
                     _n = "UNKNOWN"
-                logger.log(TRACE, "cmd_received name=%s from=%s", _n, addr)
+                logger.log(TRACE, "cmd_received name=%s from=%s cmd_str=%s", _n, addr, cmd_str)
                 state = self.state_manager.get_state()
 
                 # Track command reception for frequency metrics
@@ -632,14 +632,16 @@ class Controller:
 
                 # Stream fast-path: if an active streamable command of the same type exists,
                 # reuse the instance by calling match/setup and skip object creation/queueing.
-                if state.stream_mode and self.active_command:
+                # Capture active_command locally to avoid race condition with main control loop
+                active_cmd = self.active_command
+                if state.stream_mode and active_cmd:
                     logger.log(
                         TRACE,
                         "stream_fast_path_considered active=%s incoming=%s",
-                        type(self.active_command.command).__name__,
+                        type(active_cmd.command).__name__,
                         cmd_name,
                     )
-                    active_inst = self.active_command.command
+                    active_inst = active_cmd.command
                     if (
                         isinstance(active_inst, MotionCommand)
                         and active_inst.streamable
@@ -837,10 +839,38 @@ class Controller:
                                     logger.info(
                                         "Serial reader thread started (after SIMULATOR toggle)"
                                     )
+
+                                    # Wait for first frame with timeout (max 500ms)
+                                    # This ensures the transport is actually working before responding OK
+                                    wait_start = time.perf_counter()
+                                    wait_timeout = 0.5
+                                    frame_received = False
+                                    while time.perf_counter() - wait_start < wait_timeout:
+                                        mv, ver, ts = self.serial_transport.get_latest_frame_view()
+                                        if mv is not None and ver > 0:
+                                            frame_received = True
+                                            self.first_frame_received = True
+                                            logger.info(
+                                                "First frame received after SIMULATOR toggle (%.3fs)",
+                                                time.perf_counter() - wait_start,
+                                            )
+                                            break
+                                        time.sleep(0.01)  # 10ms polling interval
+
+                                    if not frame_received:
+                                        logger.warning(
+                                            "Timeout waiting for first frame after SIMULATOR toggle"
+                                        )
                             except Exception as e:
                                 logger.warning(
                                     f"Failed to (re)configure transport on SIMULATOR: {e}"
                                 )
+                                # Send ERROR response on transport failure
+                                if self.udp_transport:
+                                    self.udp_transport.send_response(
+                                        f"ERROR|Transport switch failed: {e}", addr
+                                    )
+                                continue  # Skip the OK response below
                     except Exception as e:
                         logger.debug(f"System command side-effect handling failed: {e}")
 
@@ -900,16 +930,18 @@ class Controller:
                     ):
                         self.active_command = None
 
-                # Clear any queued streamable commands without per-command ACKs to reduce UDP chatter
-                removed = 0
-                for queued_cmd in list(self.command_queue):
-                    if isinstance(queued_cmd.command, MotionCommand) and getattr(
-                        queued_cmd.command, "streamable", False
-                    ):
-                        self.command_queue.remove(queued_cmd)
-                        removed += 1
-                if removed:
-                    logger.log(TRACE, "queued_streamables_removed count=%d", removed)
+                    # Clear any queued streamable commands without per-command ACKs to reduce UDP chatter
+                    # NOTE: This must be inside the stream_mode block to avoid clearing queued commands
+                    # during normal script execution (which should queue commands sequentially)
+                    removed = 0
+                    for queued_cmd in list(self.command_queue):
+                        if isinstance(queued_cmd.command, MotionCommand) and getattr(
+                            queued_cmd.command, "streamable", False
+                        ):
+                            self.command_queue.remove(queued_cmd)
+                            removed += 1
+                    if removed:
+                        logger.log(TRACE, "queued_streamables_removed count=%d", removed)
 
                 # Queue the command
                 status = self._queue_command(addr, command, None)

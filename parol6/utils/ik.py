@@ -96,7 +96,7 @@ def solve_ik(
     cq: NDArray[np.float64] = np.asarray(current_q, dtype=np.float64)
     result = robot.ets().ik_LM(
         target_pose, q0=cq, tol=1e-10, joint_limits=True, k=0.0, method="sugihara"
-    )
+    ) # Small tol needed so it moves at slow speeds
     q = result[0]
     success = result[1] > 0
     iterations = result[2]

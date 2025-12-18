@@ -4,22 +4,47 @@ from parol6.protocol import wire
 
 def test_encode_move_joint_with_none():
     s = wire.encode_move_joint([1, 2, 3, 4, 5, 6], None, None)
-    assert s == "MOVEJOINT|1|2|3|4|5|6|NONE|NONE"
+    assert s == "MOVEJOINT|1|2|3|4|5|6|NONE|NONE|NONE"
 
 
 def test_encode_move_joint_with_values():
     s = wire.encode_move_joint([0, -10.5, 20, 30.25, -40, 50], 2.5, 75)
-    assert s == "MOVEJOINT|0|-10.5|20|30.25|-40|50|2.5|75"
+    assert s == "MOVEJOINT|0|-10.5|20|30.25|-40|50|2.5|75|NONE"
+
+
+def test_encode_move_joint_with_accel():
+    s = wire.encode_move_joint([0, 0, 0, 0, 0, 0], None, 50, 75)
+    assert s == "MOVEJOINT|0|0|0|0|0|0|NONE|50|75"
 
 
 def test_encode_move_pose():
     s = wire.encode_move_pose([1, 2, 3, 4, 5, 6], 1.0, None)
-    assert s == "MOVEPOSE|1|2|3|4|5|6|1.0|NONE"
+    assert s == "MOVEPOSE|1|2|3|4|5|6|1.0|NONE|NONE"
+
+
+def test_encode_move_pose_with_accel():
+    s = wire.encode_move_pose([1, 2, 3, 4, 5, 6], None, 50, 75)
+    assert s == "MOVEPOSE|1|2|3|4|5|6|NONE|50|75"
 
 
 def test_encode_move_cartesian():
+    # Without accel parameter (backwards compatible)
     s = wire.encode_move_cartesian([10, 20, 30, 1, 2, 3], None, 50)
-    assert s == "MOVECART|10|20|30|1|2|3|NONE|50"
+    assert s == "MOVECART|10|20|30|1|2|3|NONE|50|NONE"
+
+
+def test_encode_move_cartesian_with_accel():
+    # With accel parameter
+    s = wire.encode_move_cartesian([10, 20, 30, 1, 2, 3], None, 50, 75)
+    assert s == "MOVECART|10|20|30|1|2|3|NONE|50|75"
+
+    # With duration and accel
+    s2 = wire.encode_move_cartesian([0, 0, 0, 0, 0, 0], 2.5, None, 100)
+    assert s2 == "MOVECART|0|0|0|0|0|0|2.5|NONE|100"
+
+    # With all None optionals
+    s3 = wire.encode_move_cartesian([1, 2, 3, 4, 5, 6], None, None, None)
+    assert s3 == "MOVECART|1|2|3|4|5|6|NONE|NONE|NONE"
 
 
 def test_encode_move_cartesian_rel_trf_variants():
@@ -124,3 +149,32 @@ def test_decode_status_invalid_returns_none():
     assert wire.decode_status("STATUS|") is None
     assert wire.decode_status("") is None
     assert wire.decode_status("NOTSTATUS|whatever") is None
+
+
+@pytest.mark.parametrize(
+    "resp,expected_serial,expected_raw",
+    [
+        ("PONG|SERIAL=1", True, "PONG|SERIAL=1"),
+        ("PONG|SERIAL=0", False, "PONG|SERIAL=0"),
+        ("PONG|SERIAL=1|OTHER=data", True, "PONG|SERIAL=1|OTHER=data"),
+        ("PONG", False, "PONG"),  # No SERIAL field defaults to False
+    ],
+)
+def test_decode_ping_success(resp, expected_serial, expected_raw):
+    result = wire.decode_ping(resp)
+    assert result is not None
+    assert result["serial_connected"] == expected_serial
+    assert result["raw"] == expected_raw
+
+
+@pytest.mark.parametrize(
+    "resp",
+    [
+        None,
+        "",
+        "NOT_PONG|SERIAL=1",
+        "ERROR|something",
+    ],
+)
+def test_decode_ping_invalid_returns_none(resp):
+    assert wire.decode_ping(resp) is None
