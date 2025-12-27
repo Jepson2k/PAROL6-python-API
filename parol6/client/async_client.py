@@ -336,13 +336,32 @@ class AsyncRobotClient:
 
     # --------------- Motion / Control ---------------
 
-    async def home(self) -> bool:
-        return await self._send("HOME")
+    async def home(self, wait: bool = False, **wait_kwargs) -> bool:
+        """Home the robot to its home position.
+
+        Args:
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete() (timeout, settle_window, etc.)
+        """
+        result = await self._send("HOME")
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def enable(self) -> bool:
+        """Enable the robot controller, allowing motion commands.
+
+        Returns:
+            True if the command was acknowledged successfully.
+        """
         return await self._send("ENABLE")
 
     async def disable(self) -> bool:
+        """Disable the robot controller, stopping all motion.
+
+        Returns:
+            True if the command was acknowledged successfully.
+        """
         return await self._send("DISABLE")
 
     async def stop(self) -> bool:
@@ -354,23 +373,68 @@ class AsyncRobotClient:
         return await self.enable()
 
     async def stream_on(self) -> bool:
+        """Enable streaming mode for high-frequency motion commands.
+
+        In streaming mode, motion commands are sent without waiting for
+        acknowledgment, allowing higher command rates for smooth motion.
+
+        Returns:
+            True if the command was acknowledged successfully.
+        """
         self._stream_mode = True
         return await self._send("STREAM|ON")
 
     async def stream_off(self) -> bool:
+        """Disable streaming mode, returning to acknowledged motion commands.
+
+        Returns:
+            True if the command was acknowledged successfully.
+        """
         self._stream_mode = False
         return await self._send("STREAM|OFF")
 
     async def simulator_on(self) -> bool:
+        """Enable simulator mode (no physical robot hardware required).
+
+        The controller will use simulated robot dynamics instead of
+        communicating with real hardware over serial.
+
+        Returns:
+            True if the command was acknowledged successfully.
+        """
         return await self._send("SIMULATOR|ON")
 
     async def simulator_off(self) -> bool:
+        """Disable simulator mode, switching to real hardware communication.
+
+        Returns:
+            True if the command was acknowledged successfully.
+        """
         return await self._send("SIMULATOR|OFF")
 
     async def set_serial_port(self, port_str: str) -> bool:
+        """Set the serial port for robot hardware communication.
+
+        Args:
+            port_str: Serial port path (e.g., '/dev/ttyUSB0' or 'COM3').
+
+        Returns:
+            True if the command was acknowledged successfully.
+
+        Raises:
+            ValueError: If port_str is empty.
+        """
         if not port_str:
             raise ValueError("No port provided")
         return await self._send(f"SET_PORT|{port_str}")
+
+    async def reset(self) -> bool:
+        """Reset controller state to initial values.
+
+        Instantly resets positions to home, clears queues, resets tool/errors.
+        Preserves serial connection. Useful for fast test isolation.
+        """
+        return await self._send(wire.encode_reset())
 
     # --------------- Status / Queries ---------------
     async def ping(self) -> PingResult | None:
@@ -385,6 +449,12 @@ class AsyncRobotClient:
         return wire.decode_ping(resp)
 
     async def get_angles(self) -> list[float] | None:
+        """Get current joint angles in degrees.
+
+        Returns:
+            List of 6 joint angles in degrees [J1, J2, J3, J4, J5, J6],
+            or None on timeout.
+        """
         resp = await self._request("GET_ANGLES", bufsize=1024)
         if not resp:
             return None
@@ -392,6 +462,12 @@ class AsyncRobotClient:
         return cast(list[float] | None, vals)
 
     async def get_io(self) -> list[int] | None:
+        """Get digital I/O status.
+
+        Returns:
+            List of 5 integers [in1, in2, out1, out2, estop] where estop=0
+            means E-stop is pressed, or None on timeout.
+        """
         resp = await self._request("GET_IO", bufsize=1024)
         if not resp:
             return None
@@ -399,6 +475,12 @@ class AsyncRobotClient:
         return cast(list[int] | None, vals)
 
     async def get_gripper_status(self) -> list[int] | None:
+        """Get electric gripper status.
+
+        Returns:
+            List of at least 6 integers [id, pos, speed, current, status, obj_detected],
+            or None on timeout.
+        """
         resp = await self._request("GET_GRIPPER", bufsize=1024)
         if not resp:
             return None
@@ -406,6 +488,12 @@ class AsyncRobotClient:
         return cast(list[int] | None, vals)
 
     async def get_speeds(self) -> list[float] | None:
+        """Get current joint speeds in steps per second.
+
+        Returns:
+            List of 6 joint speeds [J1, J2, J3, J4, J5, J6] in steps/sec,
+            or None on timeout.
+        """
         resp = await self._request("GET_SPEEDS", bufsize=1024)
         if not resp:
             return None
@@ -563,7 +651,7 @@ class AsyncRobotClient:
             return False
         return max(abs(s) for s in speeds) < threshold_speed
 
-    async def wait_until_stopped(
+    async def wait_motion_complete(
         self,
         timeout: float = 90.0,
         settle_window: float = 1.0,
@@ -702,13 +790,28 @@ class AsyncRobotClient:
         duration: float | None = None,
         speed_percentage: int | None = None,
         accel_percentage: int | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
+        """Move to specified joint angles.
+
+        Args:
+            joint_angles: Target joint angles in degrees
+            duration: Time to complete motion in seconds
+            speed_percentage: Speed as percentage (1-100)
+            accel_percentage: Acceleration as percentage (1-100)
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
+        """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
                 "You must provide either a duration or a speed_percentage."
             )
         message = wire.encode_move_joint(joint_angles, duration, speed_percentage, accel_percentage)
-        return await self._send(message)
+        result = await self._send(message)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def move_pose(
         self,
@@ -716,13 +819,28 @@ class AsyncRobotClient:
         duration: float | None = None,
         speed_percentage: int | None = None,
         accel_percentage: int | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
+        """Move to specified pose using joint-space interpolation.
+
+        Args:
+            pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees
+            duration: Time to complete motion in seconds
+            speed_percentage: Speed as percentage (1-100)
+            accel_percentage: Acceleration as percentage (1-100)
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
+        """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
                 "You must provide either a duration or a speed_percentage."
             )
         message = wire.encode_move_pose(pose, duration, speed_percentage, accel_percentage)
-        return await self._send(message)
+        result = await self._send(message)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def move_cartesian(
         self,
@@ -730,13 +848,28 @@ class AsyncRobotClient:
         duration: float | None = None,
         speed_percentage: float | None = None,
         accel_percentage: float | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
+        """Move to specified pose using Cartesian-space interpolation.
+
+        Args:
+            pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees
+            duration: Time to complete motion in seconds
+            speed_percentage: Speed as percentage (1-100)
+            accel_percentage: Acceleration as percentage (1-100)
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
+        """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
                 "You must provide either a duration or a speed_percentage."
             )
         message = wire.encode_move_cartesian(pose, duration, speed_percentage, accel_percentage)
-        return await self._send(message)
+        result = await self._send(message)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def move_cartesian_rel_trf(
         self,
@@ -746,10 +879,20 @@ class AsyncRobotClient:
         accel_percentage: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Send a MOVECARTRELTRF (relative straight-line in TRF) command.
-        Provide either duration or speed_percentage (1..100).
+        """Send a MOVECARTRELTRF (relative straight-line in TRF) command.
+
+        Args:
+            deltas: Relative movement [dx, dy, dz, rx, ry, rz] in mm and degrees
+            duration: Time to complete motion in seconds
+            speed_percentage: Speed as percentage (1-100)
+            accel_percentage: Acceleration as percentage (1-100)
+            profile: Motion profile type
+            tracking: Tracking mode
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
@@ -758,7 +901,10 @@ class AsyncRobotClient:
         message = wire.encode_move_cartesian_rel_trf(
             deltas, duration, speed_percentage, accel_percentage, profile, tracking
         )
-        return await self._send(message)
+        result = await self._send(message)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def jog_joint(
         self,
@@ -767,9 +913,20 @@ class AsyncRobotClient:
         duration: float | None = None,
         distance_deg: float | None = None,
     ) -> bool:
-        """
-        Send a JOG command for a single joint (0..5 positive, 6..11 negative for reverse).
-        duration and distance_deg are optional; at least one should be provided for one-shot jog.
+        """Jog a single joint at a specified speed.
+
+        Args:
+            joint_index: Joint to jog (0-5 for positive direction,
+                6-11 for negative/reverse direction).
+            speed_percentage: Speed as percentage (1-100).
+            duration: Time to jog in seconds.
+            distance_deg: Distance to jog in degrees.
+
+        Returns:
+            True if the command was sent successfully.
+
+        Raises:
+            RuntimeError: If neither duration nor distance_deg is provided.
         """
         if duration is None and distance_deg is None:
             raise RuntimeError(
@@ -787,8 +944,16 @@ class AsyncRobotClient:
         speed_percentage: int,
         duration: float,
     ) -> bool:
-        """
-        Send a CARTJOG command (frame 'TRF' or 'WRF', axis in {X+/X-/Y+/.../RZ-}).
+        """Jog the robot in Cartesian space along a specified axis.
+
+        Args:
+            frame: Reference frame ('TRF' for Tool, 'WRF' for World).
+            axis: Axis and direction to jog (e.g., 'X+', 'X-', 'Y+', 'RZ-').
+            speed_percentage: Speed as percentage (1-100).
+            duration: Time to jog in seconds.
+
+        Returns:
+            True if the command was sent successfully.
         """
         message = wire.encode_cart_jog(frame, axis, speed_percentage, duration)
         return await self._send(message)
@@ -799,8 +964,18 @@ class AsyncRobotClient:
         speeds: list[float],
         duration: float,
     ) -> bool:
-        """
-        Send a MULTIJOG command to jog multiple joints simultaneously for 'duration' seconds.
+        """Jog multiple joints simultaneously.
+
+        Args:
+            joints: List of joint indices to jog (0-5).
+            speeds: List of speeds for each joint (percentage, can be negative).
+            duration: Time to jog in seconds.
+
+        Returns:
+            True if the command was sent successfully.
+
+        Raises:
+            ValueError: If joints and speeds lists have different lengths.
         """
         if len(joints) != len(speeds):
             raise ValueError(
@@ -812,9 +987,17 @@ class AsyncRobotClient:
         return await self._send(message)
 
     async def set_io(self, index: int, value: int) -> bool:
-        """
-        Set digital I/O bit.
-        index: 0..7, value: 0 or 1
+        """Set a digital I/O output bit.
+
+        Args:
+            index: Output index (0-7).
+            value: Output value (0 or 1).
+
+        Returns:
+            True if the command was sent successfully.
+
+        Raises:
+            ValueError: If index is not 0-7 or value is not 0 or 1.
         """
         if index < 0 or index > 7:
             raise ValueError("I/O index must be 0..7")
@@ -823,8 +1006,19 @@ class AsyncRobotClient:
         return await self._send(f"SET_IO|{index}|{value}")
 
     async def delay(self, seconds: float) -> bool:
-        """
-        Insert a non-blocking delay in the motion queue.
+        """Insert a non-blocking delay in the motion queue.
+
+        The delay is queued with other motion commands and executes
+        in sequence without blocking the client.
+
+        Args:
+            seconds: Delay duration in seconds (must be positive).
+
+        Returns:
+            True if the command was sent successfully.
+
+        Raises:
+            ValueError: If seconds is not positive.
         """
         if seconds <= 0:
             raise ValueError("Delay must be positive")
@@ -832,11 +1026,16 @@ class AsyncRobotClient:
 
     # --------------- IO / Gripper ---------------
 
-    async def control_pneumatic_gripper(self, action: str, port: int) -> bool:
-        """
-        Control pneumatic gripper via digital outputs.
-        action: 'open' or 'close'
-        port: 1 or 2
+    async def control_pneumatic_gripper(
+        self, action: str, port: int, wait: bool = False, **wait_kwargs
+    ) -> bool:
+        """Control pneumatic gripper via digital outputs.
+
+        Args:
+            action: 'open' or 'close'
+            port: 1 or 2
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         action = action.lower()
         if action not in ("open", "close"):
@@ -844,7 +1043,10 @@ class AsyncRobotClient:
         if port not in (1, 2):
             raise ValueError("Invalid pneumatic port")
         message = f"PNEUMATICGRIPPER|{action}|{port}"
-        return await self._send(message)
+        result = await self._send(message)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def control_electric_gripper(
         self,
@@ -852,13 +1054,18 @@ class AsyncRobotClient:
         position: int | None = 255,
         speed: int | None = 150,
         current: int | None = 500,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Control electric gripper.
-        action: 'move' or 'calibrate'
-        position: 0..255
-        speed: 0..255
-        current: 100..1000 (mA)
+        """Control electric gripper.
+
+        Args:
+            action: 'move' or 'calibrate'
+            position: 0..255
+            speed: 0..255
+            current: 100..1000 (mA)
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         action = action.lower()
         if action not in ("move", "calibrate"):
@@ -867,20 +1074,36 @@ class AsyncRobotClient:
         spd = 0 if speed is None else int(speed)
         cur = 100 if current is None else int(current)
         message = f"ELECTRICGRIPPER|{action}|{pos}|{spd}|{cur}"
-        return await self._send(message)
+        result = await self._send(message)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     # --------------- GCODE ---------------
 
     async def execute_gcode(self, gcode_line: str) -> bool:
-        """
-        Execute a single GCODE line.
+        """Execute a single G-code line.
+
+        Args:
+            gcode_line: G-code command to execute (e.g., 'G0 X100 Y50').
+
+        Returns:
+            True if the command was sent successfully.
         """
         message = wire.encode_gcode(gcode_line)
         return await self._send(message)
 
     async def execute_gcode_program(self, program_lines: list[str]) -> bool:
-        """
-        Execute a GCODE program from a list of lines.
+        """Execute a G-code program from a list of lines.
+
+        Args:
+            program_lines: List of G-code lines to execute sequentially.
+
+        Returns:
+            True if the command was sent successfully.
+
+        Raises:
+            SyntaxError: If any line contains the pipe '|' character.
         """
         for i, line in enumerate(program_lines):
             if "|" in line:
@@ -889,15 +1112,23 @@ class AsyncRobotClient:
         return await self._send(message)
 
     async def load_gcode_file(self, filepath: str) -> bool:
-        """
-        Load and execute a GCODE program from a file.
+        """Load and execute a G-code program from a file.
+
+        Args:
+            filepath: Path to the G-code file on the controller.
+
+        Returns:
+            True if the command was sent successfully.
         """
         message = f"GCODE_PROGRAM|FILE|{filepath}"
         return await self._send(message)
 
     async def get_gcode_status(self) -> dict | None:
-        """
-        Get the current status of the GCODE interpreter.
+        """Get the current status of the G-code interpreter.
+
+        Returns:
+            Dict with interpreter state, current line, progress, etc.,
+            or None on timeout.
         """
         resp = await self._request("GET_GCODE_STATUS", bufsize=2048)
         if not resp or not resp.startswith("GCODE_STATUS|"):
@@ -934,9 +1165,10 @@ class AsyncRobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: float | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a smooth circular motion.
+        """Execute a smooth circular motion.
 
         Args:
             center: [x, y, z] center point in mm
@@ -951,6 +1183,8 @@ class AsyncRobotClient:
             clockwise: Direction of motion
             trajectory_type: Type of trajectory
             jerk_limit: Optional jerk limit for s_curve trajectory
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
@@ -974,7 +1208,10 @@ class AsyncRobotClient:
             f"SMOOTH_CIRCLE|{center_str}|{radius}|{plane}|{frame}|{start_str}|"
             f"{timing_str}|{clockwise_str}{traj_params}{mode_params}"
         )
-        return await self._send(command)
+        result = await self._send(command)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def smooth_arc_center(
         self,
@@ -987,9 +1224,10 @@ class AsyncRobotClient:
         clockwise: bool = False,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: float | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a smooth arc motion defined by center point.
+        """Execute a smooth arc motion defined by center point.
 
         Args:
             end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
@@ -1001,6 +1239,8 @@ class AsyncRobotClient:
             clockwise: Direction of motion
             trajectory_type: Type of trajectory
             jerk_limit: Optional jerk limit for s_curve trajectory
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
@@ -1024,7 +1264,10 @@ class AsyncRobotClient:
             f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{frame}|{start_str}|"
             f"{timing_str}|{clockwise_str}{traj_params}"
         )
-        return await self._send(command)
+        result = await self._send(command)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def smooth_arc_param(
         self,
@@ -1038,9 +1281,24 @@ class AsyncRobotClient:
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: float | None = None,
         clockwise: bool = False,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a smooth arc motion defined parametrically (radius and angle).
+        """Execute a smooth arc motion defined parametrically (radius and angle).
+
+        Args:
+            end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
+            radius: Arc radius in mm
+            arc_angle: Arc angle in degrees
+            frame: Reference frame ('WRF' for World, 'TRF' for Tool)
+            start_pose: Optional [x, y, z, rx, ry, rz] start pose
+            duration: Time to complete the arc in seconds
+            speed_percentage: Speed as percentage (1-100)
+            trajectory_type: Type of trajectory
+            jerk_limit: Optional jerk limit for s_curve trajectory
+            clockwise: Direction of motion
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
@@ -1067,7 +1325,10 @@ class AsyncRobotClient:
             parts.append(str(jerk_limit))
         if clockwise:
             parts.append("CW")
-        return await self._send("|".join(parts))
+        result = await self._send("|".join(parts))
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def smooth_spline(
         self,
@@ -1078,9 +1339,10 @@ class AsyncRobotClient:
         speed_percentage: float | None = None,
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
         jerk_limit: float | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a smooth spline motion through waypoints.
+        """Execute a smooth spline motion through waypoints.
 
         Args:
             waypoints: List of [x, y, z, rx, ry, rz] poses (mm and degrees)
@@ -1090,9 +1352,8 @@ class AsyncRobotClient:
             speed_percentage: Speed as percentage (1-100)
             trajectory_type: Type of trajectory
             jerk_limit: Optional jerk limit for s_curve trajectory
-            wait_for_ack: Enable command tracking
-            timeout: Timeout for acknowledgment
-            non_blocking: Return immediately with command ID
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
@@ -1121,7 +1382,10 @@ class AsyncRobotClient:
         elif trajectory_type == "s_curve":
             parts.append("DEFAULT")
         parts.extend(waypoint_strs)
-        return await self._send("|".join(parts))
+        result = await self._send("|".join(parts))
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def smooth_helix(
         self,
@@ -1136,9 +1400,10 @@ class AsyncRobotClient:
         duration: float | None = None,
         speed_percentage: float | None = None,
         clockwise: bool = False,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a smooth helical motion.
+        """Execute a smooth helical motion.
 
         Args:
             center: [x, y, z] helix center point in mm
@@ -1152,6 +1417,8 @@ class AsyncRobotClient:
             duration: Time to complete the helix in seconds
             speed_percentage: Speed as percentage (1-100)
             clockwise: Direction of motion
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed_percentage is None:
             raise RuntimeError(
@@ -1174,7 +1441,10 @@ class AsyncRobotClient:
             f"SMOOTH_HELIX|{center_str}|{radius}|{pitch}|{height}|{frame}|{start_str}|"
             f"{timing_str}|{clockwise_str}{traj_params}"
         )
-        return await self._send(command)
+        result = await self._send(command)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def smooth_blend(
         self,
@@ -1184,9 +1454,10 @@ class AsyncRobotClient:
         start_pose: list[float] | None = None,
         duration: float | None = None,
         speed_percentage: float | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a blended motion through multiple segments.
+        """Execute a blended motion through multiple segments.
 
         Args:
             segments: List of segment dictionaries
@@ -1195,9 +1466,8 @@ class AsyncRobotClient:
             start_pose: Optional [x, y, z, rx, ry, rz] start pose
             duration: Total time for entire motion
             speed_percentage: Speed as percentage (1-100) for entire motion
-            wait_for_ack: Enable command tracking
-            timeout: Timeout for acknowledgment
-            non_blocking: Return immediately with command ID
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         num_segments = len(segments)
         start_str = ",".join(map(str, start_pose)) if start_pose else "CURRENT"
@@ -1236,7 +1506,10 @@ class AsyncRobotClient:
             f"SMOOTH_BLEND|{num_segments}|{blend_time}|{frame}|{start_str}|{timing_str}|"
             + "||".join(segment_strs)
         )
-        return await self._send(command)
+        result = await self._send(command)
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     async def smooth_waypoints(
         self,
@@ -1249,9 +1522,23 @@ class AsyncRobotClient:
         frame: Literal["WRF", "TRF"] = "WRF",
         trajectory_type: Literal["cubic", "quintic", "s_curve"] = "quintic",
         duration: float | None = None,
+        wait: bool = False,
+        **wait_kwargs,
     ) -> bool:
-        """
-        Execute a waypoint trajectory with blending.
+        """Execute a waypoint trajectory with blending.
+
+        Args:
+            waypoints: List of [x, y, z, rx, ry, rz] poses (mm and degrees)
+            blend_radii: Blend radii for intermediate waypoints ('AUTO' or list)
+            blend_mode: Blending mode ('parabolic', 'circular', 'none')
+            via_modes: List of 'via' or 'stop' for each waypoint
+            max_velocity: Maximum velocity
+            max_acceleration: Maximum acceleration
+            frame: Reference frame ('WRF' for World, 'TRF' for Tool)
+            trajectory_type: Type of trajectory
+            duration: Total time for the motion in seconds
+            wait: If True, block until motion completes
+            **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if not waypoints or any(len(wp) != 6 for wp in waypoints):
             raise ValueError("Waypoints must be a non-empty list of [x,y,z,rx,ry,rz]")
@@ -1286,7 +1573,10 @@ class AsyncRobotClient:
         ]
         if duration is not None:
             parts.append(str(duration))
-        return await self._send("|".join(parts))
+        result = await self._send("|".join(parts))
+        if wait and result:
+            await self.wait_motion_complete(**wait_kwargs)
+        return result
 
     # --------------- Work coordinate helpers ---------------
 

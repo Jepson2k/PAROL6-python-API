@@ -145,6 +145,83 @@ class ControllerState:
         default_factory=lambda: np.zeros((16,), dtype=np.float64)
     )
 
+    def reset(self) -> None:
+        """
+        Reset robot state to initial values without losing connection state.
+
+        Preserves: ser, ip, port, start_time
+        Resets: positions, speeds, I/O, queues, tool, errors, etc.
+        """
+        # Safety and control flags
+        self.enabled = True
+        self.soft_error = False
+        self.disabled_reason = ""
+        self.e_stop_active = False
+        self.stream_mode = False
+
+        # Tool back to none
+        self._current_tool = "NONE"
+        PAROL6_ROBOT.apply_tool("NONE")
+
+        # Serial frame parsing state
+        self.input_byte = 0
+        self.start_cond1 = 0
+        self.start_cond2 = 0
+        self.start_cond3 = 0
+        self.good_start = 0
+        self.data_len = 0
+        self.data_buffer = [b""] * 255
+        self.data_counter = 0
+
+        # Command and telemetry buffers - zero out
+        self.Command_out = CommandCode.IDLE
+        self.Position_out.fill(0)
+        self.Speed_out.fill(0)
+        self.Gripper_data_out.fill(0)
+        self.Position_in.fill(0)
+        self.Speed_in.fill(0)
+        self.Timing_data_in.fill(0)
+        self.Gripper_data_in.fill(0)
+        self.Affected_joint_out.fill(0)
+        self.InOut_out.fill(0)
+        self.InOut_in.fill(0)
+        self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
+        self.Homed_in.fill(0)
+        self.Temperature_error_in.fill(0)
+        self.Position_error_in.fill(0)
+        self.Timeout_out = 0
+        self.XTR_data = 0
+
+        # Command queues - clear
+        self.command_queue.clear()
+        self.incoming_command_buffer.clear()
+        self.command_id_map.clear()
+        self.active_command = None
+        self.active_command_id = None
+        self.last_command_time = 0.0
+
+        # Action tracking
+        self.action_current = ""
+        self.action_state = "IDLE"
+        self.action_next = ""
+        self.queue_nonstreamable.clear()
+
+        # Gripper mode tracker
+        self.gripper_mode_tracker = GripperModeResetTracker()
+
+        # Metrics (keep loop_count for uptime, reset command metrics)
+        self.command_count = 0
+        self.last_command_period_s = 0.0
+        self.ema_command_period_s = 0.0
+        self.command_timestamps.clear()
+
+        # Invalidate fkine cache
+        self._fkine_se3 = None
+        self._fkine_last_pos_in.fill(0)
+        self._fkine_last_tool = ""
+
+        logger.debug("Controller state reset (preserving connection)")
+
     @property
     def current_tool(self) -> str:
         """Get the current tool name."""

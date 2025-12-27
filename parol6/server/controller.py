@@ -24,6 +24,7 @@ from parol6.commands.base import (
     QueryCommand,
     SystemCommand,
 )
+from parol6.commands.utility_commands import ResetCommand
 from parol6.gcode import GcodeInterpreter
 from parol6.protocol.wire import CommandCode, unpack_rx_frame_into
 from parol6.server.command_registry import create_command_from_parts, discover_commands
@@ -1154,6 +1155,15 @@ class Controller:
                         if state.queue_nonstreamable
                         else ""
                     )
+
+                    # Sync mock transport after RESET to ensure position consistency
+                    if isinstance(ac.command, ResetCommand) and isinstance(
+                        self.serial_transport, MockSerialTransport
+                    ):
+                        self.serial_transport.sync_from_controller_state(state)
+                        # Skip any stale frames that were encoded before sync
+                        _, ver, _ = self.serial_transport.get_latest_frame_view()
+                        self._serial_last_version = ver
 
                     # Record and clear
                     self.active_command = None

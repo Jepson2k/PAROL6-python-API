@@ -39,6 +39,7 @@ __all__ = [
     "encode_cart_jog",
     "encode_gcode",
     "encode_gcode_program_inline",
+    "encode_reset",
     "decode_ping",
     "decode_simple",
     "decode_status",
@@ -425,6 +426,11 @@ def encode_gcode_program_inline(lines: Sequence[str]) -> str:
     """
     program_str = ";".join(lines)
     return f"GCODE_PROGRAM|INLINE|{program_str}"
+
+
+def encode_reset() -> str:
+    """RESET - instantly reset controller state to initial values."""
+    return "RESET"
 
 
 # =========================

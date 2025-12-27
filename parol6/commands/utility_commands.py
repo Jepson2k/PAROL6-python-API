@@ -97,3 +97,35 @@ class DelayCommand(CommandBase):
             return ExecutionStatus.completed("Delay complete")
 
         return ExecutionStatus.executing("Delaying")
+
+
+@register_command("RESET")
+class ResetCommand(CommandBase):
+    """
+    Instantly reset controller state to initial values.
+
+    Useful for test isolation - avoids slow homing motion by instantly
+    resetting positions, clearing queues, and resetting tool/errors.
+    Preserves serial connection and network config.
+    """
+
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+        """Parse RESET command (no parameters)."""
+        if len(parts) != 1:
+            return (False, "RESET takes no parameters")
+        self.is_valid = True
+        return (True, None)
+
+    def setup(self, state: "ControllerState") -> None:
+        """Reset state immediately."""
+        state.reset()
+        logger.debug("RESET command executed")
+        self.is_finished = True
+
+    def tick(self, state: "ControllerState") -> ExecutionStatus:
+        """Already finished in setup."""
+        return ExecutionStatus.completed("Reset complete")
+
+    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+        """Already finished in setup."""
+        return ExecutionStatus.completed("Reset complete")

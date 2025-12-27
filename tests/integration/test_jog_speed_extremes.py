@@ -108,11 +108,11 @@ class TestJogSpeedExtremes:
         assert final_angles_slow is not None
         slow_movement = abs(final_angles_slow[0] - initial_angles_slow[0])
 
-        # Now jog at fast speed (opposite direction to stay in limits)
+        # Now jog at fast speed
         initial_angles_fast = client.get_angles()
         assert initial_angles_fast is not None
 
-        result = client.jog_joint(joint_index=6, speed_percentage=90, duration=0.3)  # J1 negative
+        result = client.jog_joint(joint_index=0, speed_percentage=90, duration=0.3)
         assert result is True
         time.sleep(0.8)
 

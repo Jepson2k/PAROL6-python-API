@@ -8,20 +8,6 @@ from parol6.config import DEFAULT_ACCEL_PERCENT
 class TestMoveCartCommandParsing:
     """Test MoveCartCommand.do_match parsing."""
 
-    def test_parse_legacy_9_params_no_accel(self):
-        """Legacy 9-parameter format (without accel) should use default accel."""
-        cmd = MoveCartCommand()
-        # Format: MOVECART|x|y|z|rx|ry|rz|duration|speed
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE", "50"]
-        ok, err = cmd.do_match(parts)
-
-        assert ok is True
-        assert err is None
-        assert cmd.pose == [100.0, 200.0, 300.0, 0.0, 0.0, 0.0]
-        assert cmd.duration is None
-        assert cmd.velocity_percent == 50.0
-        assert cmd.accel_percent == DEFAULT_ACCEL_PERCENT
-
     def test_parse_10_params_with_accel(self):
         """10-parameter format with explicit acceleration."""
         cmd = MoveCartCommand()
@@ -76,14 +62,14 @@ class TestMoveCartCommandParsing:
         assert cmd2.accel_percent == 100.0
 
     def test_parse_too_few_params_fails(self):
-        """Fewer than 9 parameters should fail."""
+        """Fewer than 10 parameters should fail."""
         cmd = MoveCartCommand()
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE"]  # Only 8
+        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE", "50"]  # Only 9
         ok, err = cmd.do_match(parts)
 
         assert ok is False
         assert err is not None
-        assert "8-9" in err or "parameters" in err.lower()
+        assert "9 parameters" in err or "parameters" in err.lower()
 
     def test_parse_too_many_params_fails(self):
         """More than 10 parameters should fail."""

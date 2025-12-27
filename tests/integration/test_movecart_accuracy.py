@@ -29,7 +29,7 @@ class TestMoveCartAccuracy:
         assert client.enable() is True
         # Home the robot first
         assert client.home() is True
-        assert client.wait_until_stopped(timeout=15.0)
+        assert client.wait_motion_complete(timeout=15.0)
 
         # Get home pose for reference
         home_pose = client.get_pose_rpy()
@@ -43,7 +43,7 @@ class TestMoveCartAccuracy:
         assert result is True
 
         # Wait for completion
-        assert client.wait_until_stopped(timeout=15.0)
+        assert client.wait_motion_complete(timeout=15.0)
 
         # Get final pose
         final_pose = client.get_pose_rpy()
@@ -80,7 +80,7 @@ class TestMoveCartAccuracy:
         assert client.enable() is True
         # Home first
         assert client.home() is True
-        assert client.wait_until_stopped(timeout=15.0)
+        assert client.wait_motion_complete(timeout=15.0)
 
         # Define multiple targets to test
         targets = [
@@ -98,7 +98,7 @@ class TestMoveCartAccuracy:
             assert result is True
 
             # Wait for completion
-            assert client.wait_until_stopped(timeout=15.0)
+            assert client.wait_motion_complete(timeout=15.0)
 
             # Get final pose
             final_pose = client.get_pose_rpy()
