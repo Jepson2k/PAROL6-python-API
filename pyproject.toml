@@ -51,6 +51,8 @@ dev = [
     "trimesh",
     "fast-simplification",
     "rtree",
+    "scipy-stubs",
+    "types-pyserial",
 ]
 
 [project.scripts]
@@ -103,11 +105,7 @@ filterwarnings = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["roboticstoolbox", "roboticstoolbox.*", "spatialmath", "spatialmath.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["scipy", "scipy.*", "serial"]
+module = ["roboticstoolbox", "roboticstoolbox.*", "spatialmath", "spatialmath.*", "sophuspy", "sophuspy.*"]
 ignore_missing_imports = true
 
 [tool.setuptools]

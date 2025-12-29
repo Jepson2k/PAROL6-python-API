@@ -10,7 +10,6 @@ import roboticstoolbox as rtb
 from numpy.typing import ArrayLike, NDArray
 from roboticstoolbox import ET, Link
 from roboticstoolbox.tools.urdf import URDF
-from spatialmath import SE3
 
 from parol6.tools import get_tool_transform
 
@@ -96,8 +95,9 @@ def apply_tool(tool_name: str) -> None:
     if tool_name != "NONE" and not np.allclose(T_tool, np.eye(4)):
         # Create an ELink for the tool
         # The tool is a fixed transform from the last joint
+        # ET.SE3 accepts a 4x4 numpy array directly
         tool_link = Link(
-            ET.SE3(SE3(T_tool)),
+            ET.SE3(T_tool),
             name=f"tool_{tool_name}",
             parent=base_links[-1],  # Attach to the last link
         )

@@ -12,9 +12,9 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from typing import Literal, cast
 
 import numpy as np
-from spatialmath import SO3
 
 from .. import config as cfg
+from ..utils.se3_utils import so3_rpy
 from ..ack_policy import QUERY_COMMANDS, SYSTEM_COMMANDS, AckPolicy
 from ..client.status_subscriber import subscribe_status
 from ..protocol import wire
@@ -619,7 +619,7 @@ class AsyncRobotClient:
                 ]
             )
             # Use xyz convention (rx, ry, rz) - Roll-Pitch-Yaw
-            rpy_deg = SO3(R).rpy(order="xyz", unit="deg")
+            rpy_deg = so3_rpy(R, degrees=True)
             return [x, y, z, rpy_deg[0], rpy_deg[1], rpy_deg[2]]
         except (ValueError, IndexError, ImportError):
             return None

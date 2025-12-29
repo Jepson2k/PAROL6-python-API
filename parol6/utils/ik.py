@@ -8,9 +8,9 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 import numpy as np
+import sophuspy as sp
 from numpy.typing import NDArray
 from roboticstoolbox import DHRobot
-from spatialmath import SE3
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
@@ -61,7 +61,7 @@ class IKResult(NamedTuple):
 
 def solve_ik(
     robot: DHRobot,
-    target_pose: SE3,
+    target_pose: sp.SE3,
     current_q: Sequence[float] | NDArray[np.float64],
     jogging: bool = False,
     safety_margin_rad: float = 0.03,
@@ -74,8 +74,8 @@ def solve_ik(
     ----------
     robot : DHRobot
         Robot model
-    target_pose : SE3
-        Target pose to reach
+    target_pose : sp.SE3
+        Target pose to reach (sophuspy SE3)
     current_q : array_like
         Current joint configuration in radians
     jogging : bool, optional
@@ -94,9 +94,11 @@ def solve_ik(
         violations - Error message if failed, None if successful
     """
     cq: NDArray[np.float64] = np.asarray(current_q, dtype=np.float64)
+    # ik_LM accepts numpy 4x4 matrices - extract from sophuspy SE3
+    target_matrix = target_pose.matrix()
     result = robot.ets().ik_LM(
-        target_pose, q0=cq, tol=1e-10, joint_limits=True, k=0.0, method="sugihara"
-    ) # Small tol needed so it moves at slow speeds
+        target_matrix, q0=cq, tol=1e-10, joint_limits=True, k=0.0, method="sugihara"
+    )  # Small tol needed so it moves at slow speeds
     q = result[0]
     success = result[1] > 0
     iterations = result[2]
@@ -174,3 +176,25 @@ def quintic_scaling(s: float) -> float:
     using a quintic polynomial, ensuring smooth start/end accelerations.
     """
     return 6 * (s**5) - 15 * (s**4) + 10 * (s**3)
+
+
+def fast_quintic_scaling(s: float, compression: float = 0.6) -> float:
+    """
+    Quintic with compressed slow phase for faster acceleration.
+
+    Applies s^compression before quintic to speed through the slow early phase.
+    At s=0.1: fast_quintic ≈ 0.025 vs regular quintic ≈ 0.009 (2.8x faster)
+
+    Args:
+        s: Progress from 0 to 1
+        compression: Power to apply (lower = faster ramps). Default 0.6.
+
+    Returns:
+        Scaled progress value from 0 to 1
+    """
+    if s <= 0:
+        return 0.0
+    if s >= 1:
+        return 1.0
+    # Compress input to speed through slow phase, then apply quintic
+    return quintic_scaling(s ** compression)

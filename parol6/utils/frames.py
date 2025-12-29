@@ -12,10 +12,11 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 import numpy as np
+import sophuspy as sp
 from numpy.typing import NDArray
-from spatialmath import SE3
 
 from parol6.server.state import get_fkine_se3
+from parol6.utils.se3_utils import se3_from_rpy, se3_from_trans, se3_rpy
 
 logger = logging.getLogger(__name__)
 
@@ -27,40 +28,46 @@ PLANE_NORMALS_TRF: dict[str, NDArray] = {
 }
 
 
-def point_trf_to_wrf_mm(point_mm: Sequence[float], tool_pose: SE3) -> list[float]:
+def point_trf_to_wrf_mm(point_mm: Sequence[float], tool_pose: sp.SE3) -> list[float]:
     """Convert 3D point from TRF to WRF coordinates (both in mm)."""
-    point_trf = SE3(point_mm[0] / 1000.0, point_mm[1] / 1000.0, point_mm[2] / 1000.0)
-    point_wrf = cast(SE3, tool_pose * point_trf)
-    return (point_wrf.t * 1000.0).tolist()
+    point_trf = se3_from_trans(point_mm[0] / 1000.0, point_mm[1] / 1000.0, point_mm[2] / 1000.0)
+    point_wrf = tool_pose * point_trf
+    return (point_wrf.translation() * 1000.0).tolist()
 
 
-def pose6_trf_to_wrf(pose6_mm_deg: Sequence[float], tool_pose: SE3) -> list[float]:
+def pose6_trf_to_wrf(pose6_mm_deg: Sequence[float], tool_pose: sp.SE3) -> list[float]:
     """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
-    pose_trf = SE3(
-        pose6_mm_deg[0] / 1000.0, pose6_mm_deg[1] / 1000.0, pose6_mm_deg[2] / 1000.0
-    ) * SE3.RPY(pose6_mm_deg[3:], unit="deg", order="xyz")
-    pose_wrf = cast(SE3, tool_pose * pose_trf)
+    pose_trf = se3_from_rpy(
+        pose6_mm_deg[0] / 1000.0,
+        pose6_mm_deg[1] / 1000.0,
+        pose6_mm_deg[2] / 1000.0,
+        pose6_mm_deg[3],
+        pose6_mm_deg[4],
+        pose6_mm_deg[5],
+        degrees=True,
+    )
+    pose_wrf = tool_pose * pose_trf
     return np.concatenate(
-        [pose_wrf.t * 1000.0, pose_wrf.rpy(unit="deg", order="xyz")]
+        [pose_wrf.translation() * 1000.0, se3_rpy(pose_wrf, degrees=True)]
     ).tolist()
 
 
-def se3_to_pose6_mm_deg(T: SE3) -> list[float]:
+def se3_to_pose6_mm_deg(T: sp.SE3) -> list[float]:
     """Convert SE3 transform to 6D pose [x,y,z,rx,ry,rz] (mm, degrees)."""
-    return np.concatenate([T.t * 1000.0, T.rpy(unit="deg", order="xyz")]).tolist()
+    return np.concatenate([T.translation() * 1000.0, se3_rpy(T, degrees=True)]).tolist()
 
 
 def transform_center_trf_to_wrf(
-    params: dict[str, Any], tool_pose: SE3, transformed: dict[str, Any]
+    params: dict[str, Any], tool_pose: sp.SE3, transformed: dict[str, Any]
 ) -> None:
     """Transform 'center' parameter from TRF (mm) to WRF (mm) using tool_pose."""
-    center_trf = SE3(
+    center_trf = se3_from_trans(
         params["center"][0] / 1000.0,
         params["center"][1] / 1000.0,
         params["center"][2] / 1000.0,
     )
-    center_wrf = cast(SE3, tool_pose * center_trf)
-    transformed["center"] = (center_wrf.t * 1000.0).tolist()
+    center_wrf = tool_pose * center_trf
+    transformed["center"] = (center_wrf.translation() * 1000.0).tolist()
 
 
 def transform_start_pose_if_needed(
@@ -100,7 +107,7 @@ def transform_command_params_to_wrf(
 
         if "plane" in params:
             normal_trf = PLANE_NORMALS_TRF[params["plane"]]
-            normal_wrf = tool_pose.R @ normal_trf
+            normal_wrf = tool_pose.rotationMatrix() @ normal_trf
             transformed["normal_vector"] = normal_wrf.tolist()
             logger.info(f"  -> TRF circle plane {params['plane']} transformed to WRF")
 
@@ -114,7 +121,7 @@ def transform_command_params_to_wrf(
 
         if "plane" in params:
             normal_trf = PLANE_NORMALS_TRF[params["plane"]]
-            normal_wrf = tool_pose.R @ normal_trf
+            normal_wrf = tool_pose.rotationMatrix() @ normal_trf
             transformed["normal_vector"] = normal_wrf.tolist()
 
     # SMOOTH_ARC_PARAM - Transform end_pose and arc plane
@@ -127,7 +134,7 @@ def transform_command_params_to_wrf(
             params["plane"] = "XY"  # Default to XY plane
 
         normal_trf = PLANE_NORMALS_TRF[params.get("plane", "XY")]
-        normal_wrf = tool_pose.R @ normal_trf
+        normal_wrf = tool_pose.rotationMatrix() @ normal_trf
         transformed["normal_vector"] = normal_wrf.tolist()
 
     # SMOOTH_HELIX - Transform center and helix axis
@@ -137,12 +144,12 @@ def transform_command_params_to_wrf(
 
         # Transform helix axis (default is Z-axis of tool)
         axis_trf = np.array([0.0, 0.0, 1.0])  # Tool's Z-axis
-        axis_wrf = tool_pose.R @ axis_trf
+        axis_wrf = tool_pose.rotationMatrix() @ axis_trf
         transformed["helix_axis"] = axis_wrf.tolist()
 
         # Transform up vector (default is Y-axis of tool)
         up_trf = np.array([0.0, 1.0, 0.0])  # Tool's Y-axis
-        up_wrf = tool_pose.R @ up_trf
+        up_wrf = tool_pose.rotationMatrix() @ up_trf
         transformed["up_vector"] = up_wrf.tolist()
 
     # SMOOTH_SPLINE - Transform waypoints
@@ -179,7 +186,7 @@ def transform_command_params_to_wrf(
                     # Transform plane normal if specified
                     if "plane" in seg:
                         normal_trf = PLANE_NORMALS_TRF[seg["plane"]]
-                        normal_wrf = tool_pose.R @ normal_trf
+                        normal_wrf = tool_pose.rotationMatrix() @ normal_trf
                         seg_transformed["normal_vector"] = normal_wrf.tolist()
 
                 elif seg["type"] == "CIRCLE":
@@ -192,7 +199,7 @@ def transform_command_params_to_wrf(
 
                     if "plane" in seg:
                         normal_trf = PLANE_NORMALS_TRF[seg["plane"]]
-                        normal_wrf = tool_pose.R @ normal_trf
+                        normal_wrf = tool_pose.rotationMatrix() @ normal_trf
                         seg_transformed["normal_vector"] = normal_wrf.tolist()
 
                 elif seg["type"] == "SPLINE":

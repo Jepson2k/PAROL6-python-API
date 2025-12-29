@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import numpy as np
-from spatialmath import SE3
+import sophuspy as sp
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.utils.se3_utils import se3_from_matrix
 from parol6.protocol.wire import CommandCode
 
 
@@ -139,7 +140,7 @@ class ControllerState:
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
     _fkine_last_tool: str = ""
-    _fkine_se3: Any = None  # SE3 instance from spatialmath
+    _fkine_se3: Any = None  # sophuspy SE3 instance
     _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
     _fkine_flat_mm: np.ndarray = field(
         default_factory=lambda: np.zeros((16,), dtype=np.float64)
@@ -356,14 +357,14 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         # Recompute fkine
         q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
         assert PAROL6_ROBOT.robot is not None
-        T = cast(SE3, cast(Any, PAROL6_ROBOT.robot).fkine(q))
+        T_raw = cast(Any, PAROL6_ROBOT.robot).fkine(q)
 
-        # Cache SE3 object
-        state._fkine_se3 = T
-
-        # Cache as 4x4 matrix
-        mat = np.asarray(T.A, dtype=np.float64).copy()
+        # Cache as 4x4 matrix first (fkine returns spatialmath SE3, extract .A)
+        mat = np.asarray(T_raw.A, dtype=np.float64).copy()
         np.copyto(state._fkine_mat, mat)
+
+        # Convert to sophuspy SE3 for fast operations
+        state._fkine_se3 = se3_from_matrix(mat)
 
         # Cache as flattened 16-vector with mm translation
         flat = mat.reshape(-1).copy()
@@ -377,14 +378,14 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         state._fkine_last_tool = state.current_tool
 
 
-def get_fkine_se3(state: ControllerState | None = None) -> SE3:
+def get_fkine_se3(state: ControllerState | None = None) -> sp.SE3:
     """
-    Get the current end-effector pose as an SE3 object.
+    Get the current end-effector pose as a sophuspy SE3 object.
     Automatically updates cache if needed.
 
     Returns
     -------
-    SE3
+    sp.SE3
         Current end-effector pose
     """
     if state is None:

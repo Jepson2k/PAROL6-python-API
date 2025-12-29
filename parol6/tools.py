@@ -8,7 +8,8 @@ Tools are swappable at runtime and affect both kinematics and visualization.
 from typing import Any
 
 import numpy as np
-from spatialmath import SE3
+
+from parol6.utils.se3_utils import se3_from_trans, se3_rx
 
 TOOL_CONFIGS: dict[str, dict[str, Any]] = {
     "NONE": {
@@ -20,7 +21,7 @@ TOOL_CONFIGS: dict[str, dict[str, Any]] = {
     "PNEUMATIC": {
         "name": "Pneumatic Gripper",
         "description": "Pneumatic gripper assembly",
-        "transform": (SE3(-0.04525, 0, 0) @ SE3.Rx(np.pi)).A,
+        "transform": (se3_from_trans(-0.04525, 0, 0) * se3_rx(np.pi)).matrix(),
         "stl_files": [
             {
                 "file": "pneumatic_gripper_assembly.STL",

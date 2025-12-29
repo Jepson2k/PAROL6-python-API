@@ -1,15 +1,16 @@
+import math
 import threading
 import time
+from typing import Any
 
 import numpy as np
+import sophuspy as sp
 from numpy.typing import ArrayLike
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
 from parol6.utils.ik import AXIS_MAP, solve_ik
-from spatialmath import SE3
-from typing import Any
-import math
+from parol6.utils.se3_utils import se3_from_trans, se3_rx, se3_ry, se3_rz
 
 
 class StatusCache:
@@ -103,7 +104,7 @@ class StatusCache:
 
     def _compute_cart_enable(
         self,
-        T: SE3,
+        T: sp.SE3,
         frame: str,
         q_rad: np.ndarray,
         delta_mm: float = 0.5,
@@ -115,24 +116,24 @@ class StatusCache:
         t_step_m = delta_mm / 1000.0
         r_step_rad = math.radians(delta_deg)
         for axis, (v_lin, v_rot) in AXIS_MAP.items():
-            # Compose delta SE3 for this axis
-            dT = SE3()
+            # Compose delta SE3 for this axis - start with identity
+            dT = sp.SE3()
             # Translation
             dx = v_lin[0] * t_step_m
             dy = v_lin[1] * t_step_m
             dz = v_lin[2] * t_step_m
             if abs(dx) > 0 or abs(dy) > 0 or abs(dz) > 0:
-                dT = dT * SE3(dx, dy, dz)
+                dT = dT * se3_from_trans(dx, dy, dz)
             # Rotation
             rx = v_rot[0] * r_step_rad
             ry = v_rot[1] * r_step_rad
             rz = v_rot[2] * r_step_rad
             if abs(rx) > 0:
-                dT = dT * SE3.Rx(rx)
+                dT = dT * se3_rx(rx)
             if abs(ry) > 0:
-                dT = dT * SE3.Ry(ry)
+                dT = dT * se3_ry(ry)
             if abs(rz) > 0:
-                dT = dT * SE3.Rz(rz)
+                dT = dT * se3_rz(rz)
 
             # Apply in specified frame
             if frame == "WRF":
@@ -206,7 +207,7 @@ class StatusCache:
                 try:
                     T = get_fkine_se3(state)
                 except Exception:
-                    T = SE3()
+                    T = sp.SE3()  # Identity
                 # JOINT_EN
                 self._compute_joint_enable(q_rad)
                 # CART_EN for both frames

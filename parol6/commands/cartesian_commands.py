@@ -8,7 +8,7 @@ import time
 from typing import cast
 
 import numpy as np
-from spatialmath import SE3
+import sophuspy as sp
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import DEFAULT_ACCEL_PERCENT, INTERVAL_S, TRACE, TRACE_ENABLED
@@ -16,7 +16,16 @@ from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
 from parol6.utils.errors import IKError
-from parol6.utils.ik import AXIS_MAP, quintic_scaling, solve_ik
+from parol6.utils.ik import AXIS_MAP, fast_quintic_scaling, quintic_scaling, solve_ik
+from parol6.utils.se3_utils import (
+    se3_angdist,
+    se3_from_rpy,
+    se3_from_trans,
+    se3_interp,
+    se3_rx,
+    se3_ry,
+    se3_rz,
+)
 
 from .base import ExecutionStatus, MotionCommand, MotionProfile
 
@@ -121,7 +130,7 @@ class CartesianJogCommand(MotionCommand):
         )
         T_current = get_fkine_se3()
 
-        if not isinstance(T_current, SE3):
+        if T_current is None:
             return ExecutionStatus.executing("Waiting for valid pose")
         if self.axis_vectors is None:
             return ExecutionStatus.executing("Waiting for axis vectors")
@@ -141,22 +150,24 @@ class CartesianJogCommand(MotionCommand):
         rot_vec = np.array(self.axis_vectors[1]) * delta_angular_rad
 
         # Build delta transformation
-        if not self.is_rotation:
-            target_pose = SE3.Rt(T_current.R, T_current.t)
+        R_current = T_current.rotationMatrix()
+        t_current = T_current.translation()
 
+        if not self.is_rotation:
             if self.frame == "WRF":
-                target_pose.t = T_current.t + trans_vec
+                new_t = t_current + trans_vec
             else:  # TRF
-                target_pose.t = T_current.t + (T_current.R @ trans_vec)
+                new_t = t_current + (R_current @ trans_vec)
+            target_pose = sp.SE3(R_current, new_t)
         else:
             if rot_vec[0] != 0:  # RX rotation
-                delta_pose = SE3.Rx(rot_vec[0]) * SE3(trans_vec)
+                delta_pose = se3_rx(rot_vec[0]) * se3_from_trans(*trans_vec)
             elif rot_vec[1] != 0:  # RY rotation
-                delta_pose = SE3.Ry(rot_vec[1]) * SE3(trans_vec)
+                delta_pose = se3_ry(rot_vec[1]) * se3_from_trans(*trans_vec)
             elif rot_vec[2] != 0:  # RZ rotation
-                delta_pose = SE3.Rz(rot_vec[2]) * SE3(trans_vec)
+                delta_pose = se3_rz(rot_vec[2]) * se3_from_trans(*trans_vec)
             else:
-                delta_pose = SE3(trans_vec)
+                delta_pose = se3_from_trans(*trans_vec)
             # Apply the transformation in the correct reference frame
             if self.frame == "WRF":
                 # Pre-multiply to apply the change in the World Reference Frame
@@ -253,8 +264,16 @@ class MovePoseCommand(MotionCommand):
             PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
         )
         pose = cast(list[float], self.pose)
-        target_pose = SE3.RPY(pose[3:6], unit="deg", order="xyz")
-        target_pose.t = np.array(pose[:3]) / 1000.0
+        # Position in mm, angles in degrees
+        target_pose = se3_from_rpy(
+            pose[0] / 1000.0,
+            pose[1] / 1000.0,
+            pose[2] / 1000.0,
+            pose[3],
+            pose[4],
+            pose[5],
+            degrees=True,
+        )
 
         ik_solution = solve_ik(PAROL6_ROBOT.robot, target_pose, initial_pos_rad)
 
@@ -415,8 +434,8 @@ class MoveCartCommand(MotionCommand):
 
         # Runtime state
         self.start_time = None
-        self.initial_pose = None
-        self.target_pose = None
+        self.initial_pose: sp.SE3 | None = None
+        self.target_pose: sp.SE3 | None = None
         self._s_offset = 0.0  # Progress offset for streaming (phase-preserving quintic)
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
@@ -470,9 +489,16 @@ class MoveCartCommand(MotionCommand):
         """
         pose = cast(list[float], self.pose)
 
-        # Construct new target pose: rotation first, then set translation (xyz convention)
-        new_target = SE3.RPY(pose[3:6], unit="deg", order="xyz")
-        new_target.t = np.array(pose[:3]) / 1000.0
+        # Construct new target pose (position in mm, angles in degrees)
+        new_target = se3_from_rpy(
+            pose[0] / 1000.0,
+            pose[1] / 1000.0,
+            pose[2] / 1000.0,
+            pose[3],
+            pose[4],
+            pose[5],
+            degrees=True,
+        )
 
         # Check if this is a stream update (command already in progress)
         # Only blend when streaming is enabled AND command is mid-execution
@@ -485,30 +511,40 @@ class MoveCartCommand(MotionCommand):
             and not self.is_finished
         )
 
+        if state.stream_mode and not is_stream_update:
+            self.log_debug("  -> Stream update check failed: _t0=%s, initial=%s, target=%s, finished=%s",
+                          self._t0 is not None, self.initial_pose is not None,
+                          self.target_pose is not None, self.is_finished)
+
         if is_stream_update:
-            # BLEND MODE: Update target while maintaining smooth motion
-            # Get current interpolated position as new starting point
+            # STREAM UPDATE: Update target while preserving motion continuity
+            self.log_debug("  -> Stream blend: updating target")
+
+            # Capture current interpolated position as new start point
             dur = float(self.duration or 0.0)
             if dur > 0:
                 s = self.progress01(dur)
-                s_scaled = quintic_scaling(float(s))
-                current_interp = cast(SE3, self.initial_pose).interp(
-                    cast(SE3, self.target_pose), s_scaled
+                # Use fast quintic for faster response
+                s_scaled = fast_quintic_scaling(float(s), compression=0.3)
+                # sophuspy's native Lie algebra interpolation is fast
+                self.initial_pose = se3_interp(
+                    cast(sp.SE3, self.initial_pose),
+                    cast(sp.SE3, self.target_pose),
+                    s_scaled,
                 )
-                self.initial_pose = current_interp
             else:
-                # No duration yet, use current FK position
                 self.initial_pose = get_fkine_se3()
 
             # Update target to new destination
             self.target_pose = new_target
+            self.is_finished = False
 
-            # Recalculate duration for new distance if using velocity_percent
+            # Recalculate duration based on remaining distance
             if self.velocity_percent is not None:
-                tp = cast(SE3, self.target_pose)
-                ip = cast(SE3, self.initial_pose)
-                linear_distance = float(np.linalg.norm(tp.t - ip.t))
-                angular_distance_rad = float(ip.angdist(tp))
+                tp = cast(sp.SE3, self.target_pose)
+                ip = cast(sp.SE3, self.initial_pose)
+                linear_distance = float(np.linalg.norm(tp.translation() - ip.translation()))
+                angular_distance_rad = se3_angdist(ip, tp)
                 angular_distance_deg = np.rad2deg(angular_distance_rad)
 
                 target_linear_speed = self.linmap_pct(
@@ -517,8 +553,6 @@ class MoveCartCommand(MotionCommand):
                 target_angular_speed_deg = self.linmap_pct(
                     self.velocity_percent, self.CART_ANG_JOG_MIN, self.CART_ANG_JOG_MAX
                 )
-
-                # Get acceleration from accel_percent
                 target_linear_accel = self.linmap_pct(
                     self.accel_percent, self.CART_LIN_ACC_MIN, self.CART_LIN_ACC_MAX
                 )
@@ -526,38 +560,19 @@ class MoveCartCommand(MotionCommand):
                     self.accel_percent, self.CART_ANG_ACC_MIN, self.CART_ANG_ACC_MAX
                 )
 
-                # Use trapezoidal profile duration (accounts for accel/decel phases)
                 time_linear = self._trapezoidal_duration(
                     linear_distance, target_linear_speed, target_linear_accel
                 )
                 time_angular = self._trapezoidal_duration(
                     angular_distance_deg, target_angular_speed_deg, target_angular_accel_deg
                 )
+                # Use minimum duration for responsiveness
+                self.duration = max(time_linear, time_angular, 0.1)
 
-                calculated_duration = max(time_linear, time_angular)
-                if calculated_duration <= 0:
-                    # Use minimum duration to keep command alive for streaming updates
-                    # This prevents the "first drag doesn't move" issue where the initial
-                    # target is very close to current position
-                    calculated_duration = 0.05  # 50ms minimum
-
-                self.duration = calculated_duration
-
-            # Phase-preserving quintic: capture current progress and reset timer
-            # This continues from current velocity point on the quintic curve
-            old_dur = float(self.duration or 0.0)
-            if old_dur > 0 and self._t0 is not None:
-                s_old = self.progress01(old_dur)
-                # Cap at 0.5 (coast velocity) - streaming updates keep us accelerating/coasting
-                self._s_offset = min(float(s_old), 0.5)
-            else:
-                self._s_offset = 0.0
-            # Reset timer for new segment - s_offset preserves velocity continuity
+            # Preserve progress offset and reset timer
+            old_s = self.progress01(dur) if dur > 0 and self._t0 else 0.0
+            self._s_offset = min(float(old_s), 0.5)
             self._t0 = time.perf_counter()
-
-            # Use TRACE level for stream updates to avoid log flooding at 50Hz
-            if TRACE_ENABLED:
-                logger.log(TRACE, "[%s]   -> Stream blend: updated target, new duration: %.2fs", type(self).__name__, self.duration or 0.0)
         else:
             # FRESH START: Original behavior - reset all streaming state
             self._t0 = None  # Reset timer for fresh start
@@ -567,10 +582,10 @@ class MoveCartCommand(MotionCommand):
 
             if self.velocity_percent is not None:
                 # Calculate the total distance for translation and rotation
-                tp = cast(SE3, self.target_pose)
-                ip = cast(SE3, self.initial_pose)
-                linear_distance = float(np.linalg.norm(tp.t - ip.t))
-                angular_distance_rad = float(ip.angdist(tp))
+                tp = cast(sp.SE3, self.target_pose)
+                ip = cast(sp.SE3, self.initial_pose)
+                linear_distance = float(np.linalg.norm(tp.translation() - ip.translation()))
+                angular_distance_rad = se3_angdist(ip, tp)
                 angular_distance_deg = np.rad2deg(angular_distance_rad)
 
                 target_linear_speed = self.linmap_pct(
@@ -599,12 +614,12 @@ class MoveCartCommand(MotionCommand):
                 # The total duration is the longer of the two times to ensure synchronization
                 calculated_duration = max(time_linear, time_angular)
 
-                if calculated_duration <= 0:
-                    # Use minimum duration to keep command alive for streaming updates
-                    # This prevents the "first drag doesn't move" issue where the initial
-                    # target is very close to current position
-                    calculated_duration = 0.05  # 50ms minimum
-                    self.log_debug("  -> Using minimum duration %.3fs for near-zero distance", calculated_duration)
+                # Use minimum duration to keep command alive for streaming updates.
+                # This must be longer than the typical command update rate (50ms at 20Hz)
+                # to ensure commands overlap and can be blended smoothly.
+                calculated_duration = max(calculated_duration, 0.2)
+                if calculated_duration == 0.2:
+                    self.log_debug("  -> Using minimum duration %.3fs for streaming", calculated_duration)
 
                 self.duration = calculated_duration
                 self.log_debug("  -> Calculated MoveCart duration: %.2fs", self.duration)
@@ -627,15 +642,16 @@ class MoveCartCommand(MotionCommand):
             s = s_offset + s_raw * (1.0 - s_offset)
         else:
             s = s_raw
-        s_scaled = quintic_scaling(float(s))
+
+        # Use fast quintic in stream mode for faster ramps
+        if state.stream_mode:
+            s_scaled = fast_quintic_scaling(float(s))
+        else:
+            s_scaled = quintic_scaling(float(s))
 
         assert self.initial_pose is not None and self.target_pose is not None
-        _ctp = cast(SE3, self.initial_pose).interp(
-            cast(SE3, self.target_pose), s_scaled
-        )
-        if not isinstance(_ctp, SE3):
-            return ExecutionStatus.executing("Waiting for pose interpolation")
-        current_target_pose = cast(SE3, _ctp)
+        # Use sophuspy's fast Lie algebra interpolation
+        current_target_pose = se3_interp(self.initial_pose, self.target_pose, s_scaled)
 
         current_q_rad = np.asarray(
             PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float

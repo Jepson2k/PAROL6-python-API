@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 import numpy as np
 from numpy.typing import NDArray
-from spatialmath import SE3
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.utils.se3_utils import se3_from_rpy, se3_rpy
 from parol6.commands.base import ExecutionStatus, ExecutionStatusCode, MotionCommand
 from parol6.commands.cartesian_commands import MovePoseCommand
 from parol6.config import ENTRY_MM_TOL_MM, INTERVAL_S, NEAR_MM_TOL_MM
@@ -215,8 +215,8 @@ class BaseSmoothMotionCommand(MotionCommand):
         """Convert current position to pose [x,y,z,rx,ry,rz]"""
         current_pose_se3 = get_fkine_se3()
 
-        current_xyz = current_pose_se3.t * 1000  # Convert to mm
-        current_rpy = current_pose_se3.rpy(unit="deg", order="xyz")
+        current_xyz = current_pose_se3.translation() * 1000  # Convert to mm
+        current_rpy = se3_rpy(current_pose_se3, degrees=True)
         return np.concatenate([current_xyz, current_rpy])
 
     def do_setup(self, state: "ControllerState") -> None:
@@ -303,12 +303,14 @@ class BaseSmoothMotionCommand(MotionCommand):
                 PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
             )
             first_pose = self.trajectory[0]
-            target_se3 = SE3(
-                first_pose[0] / 1000, first_pose[1] / 1000, first_pose[2] / 1000
-            ) * SE3.RPY(
-                [float(first_pose[3]), float(first_pose[4]), float(first_pose[5])],
-                unit="deg",
-                order="xyz",
+            target_se3 = se3_from_rpy(
+                first_pose[0] / 1000,
+                first_pose[1] / 1000,
+                first_pose[2] / 1000,
+                float(first_pose[3]),
+                float(first_pose[4]),
+                float(first_pose[5]),
+                degrees=True,
             )
 
             ik_result = solve_ik(
@@ -450,12 +452,14 @@ class SmoothTrajectoryCommand:
         target_pose = self.trajectory[self.trajectory_index]
 
         # Convert to SE3
-        target_se3 = SE3(
-            target_pose[0] / 1000, target_pose[1] / 1000, target_pose[2] / 1000
-        ) * SE3.RPY(
-            [float(target_pose[3]), float(target_pose[4]), float(target_pose[5])],
-            unit="deg",
-            order="xyz",
+        target_se3 = se3_from_rpy(
+            target_pose[0] / 1000,
+            target_pose[1] / 1000,
+            target_pose[2] / 1000,
+            float(target_pose[3]),
+            float(target_pose[4]),
+            float(target_pose[5]),
+            degrees=True,
         )
 
         # Get current joint configuration
