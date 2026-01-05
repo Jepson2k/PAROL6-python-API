@@ -102,55 +102,5 @@ class TestSmoothMotionMinimal:
         assert client.wait_motion_complete(timeout=10.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
-    def test_smooth_helix_basic(self, client, server_proc, robot_api_env, homed_robot):
-        """Test basic helical motion."""
-        result = client.smooth_helix(
-            center=[100, 100, 80],
-            radius=25,
-            pitch=20,
-            height=60,
-            duration=3.0,
-            frame="WRF",
-        )
-
-        _check_if_fake_serial_xfail(result)
-
-        assert result is True
-
-        assert client.wait_motion_complete(timeout=10.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
-
-    def test_smooth_blend_basic(self, client, server_proc, robot_api_env, homed_robot):
-        """Test basic blended motion through segments."""
-        segments = [
-            {
-                "type": "LINE",
-                "end": [120.0, 80.0, 140.0, 0.0, 0.0, 30.0],
-                "duration": 1.0,
-            },
-            {
-                "type": "CIRCLE",
-                "center": [120, 120, 140],
-                "radius": 25,
-                "plane": "XY",
-                "duration": 2.0,
-                "clockwise": False,
-            },
-        ]
-
-        result = client.smooth_blend(
-            segments=segments,
-            blend_time=0.3,
-            frame="WRF",
-        )
-
-        _check_if_fake_serial_xfail(result)
-
-        assert result is True
-
-        assert client.wait_motion_complete(timeout=10.0)
-        assert client.is_robot_stopped(threshold_speed=5.0)
-
-
 if __name__ == "__main__":
     pytest.main([__file__])

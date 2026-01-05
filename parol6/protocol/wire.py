@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 _BIT_UNPACK = np.unpackbits(
     np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big"
 )
+
+# Pre-allocated work buffers for unpack_rx_frame_into (avoid per-call allocations)
+_UNPACK_BUF_B = np.zeros((12, 3), dtype=np.uint8)
+_UNPACK_BUF_POS = np.zeros(6, dtype=np.int32)
+_UNPACK_BUF_SPD = np.zeros(6, dtype=np.int32)
+_SIGN_THRESHOLD = 1 << 23
+_SIGN_ADJUST = 1 << 24
 START = b"\xff\xff\xff"
 END = b"\x01\x02"
 PAYLOAD_LEN = 52  # matches existing firmware expectation
@@ -100,19 +107,6 @@ def fuse_2_bytes(b0: int, b1: int) -> int:
     return val - 0x10000 if (val & 0x8000) else val
 
 
-def _get_array_value(arr: np.ndarray | memoryview, index: int, default: int = 0) -> int:
-    """
-    Safely get value from array-like object with bounds checking.
-    Optimized for zero-copy access when possible.
-    """
-    try:
-        if index < len(arr):
-            return int(arr[index])
-        return default
-    except (IndexError, TypeError):
-        return default
-
-
 def pack_tx_frame_into(
     out: memoryview,
     position_out: np.ndarray,
@@ -126,93 +120,78 @@ def pack_tx_frame_into(
     """
     Pack a full TX frame into the provided memoryview without allocations.
 
-    Expects 'out' to be a writable buffer of length >= 56 bytes:
-      - 3 start bytes + 1 length byte + 52-byte payload
-
-    Layout of the 52-byte payload:
-      - 6x position (3 bytes each) = 18
-      - 6x speed (3 bytes each)    = 18
-      - 1 byte command
-      - 1 byte affected joint bitfield
-      - 1 byte in/out bitfield
-      - 1 byte timeout
-      - 2 bytes reserved (legacy)
-      - 2 bytes gripper position
-      - 2 bytes gripper speed
-      - 2 bytes gripper current
-      - 1 byte gripper command
-      - 1 byte gripper mode
-      - 1 byte gripper id
-      - 1 byte CRC (placeholder 228)
-      - 2 bytes end markers (0x01, 0x02)
+    Expects 'out' to be a writable buffer of length >= 56 bytes.
     """
     # Header
     out[0:3] = START
     out[3] = PAYLOAD_LEN
-    offset = 4
 
-    # Positions: 6 * 3 bytes
+    # Positions: 6 joints * 3 bytes each, big-endian 24-bit
     for i in range(6):
-        val = _get_array_value(position_out, i, 0)
-        b0, b1, b2 = split_to_3_bytes(val)
-        out[offset] = b0
-        out[offset + 1] = b1
-        out[offset + 2] = b2
-        offset += 3
+        v = int(position_out[i]) & 0xFFFFFF
+        j = 4 + i * 3
+        out[j] = (v >> 16) & 0xFF
+        out[j + 1] = (v >> 8) & 0xFF
+        out[j + 2] = v & 0xFF
 
-    # Speeds: 6 * 3 bytes
+    # Speeds: 6 joints * 3 bytes each
     for i in range(6):
-        val = _get_array_value(speed_out, i, 0)
-        b0, b1, b2 = split_to_3_bytes(val)
-        out[offset] = b0
-        out[offset + 1] = b1
-        out[offset + 2] = b2
-        offset += 3
+        v = int(speed_out[i]) & 0xFFFFFF
+        j = 22 + i * 3
+        out[j] = (v >> 16) & 0xFF
+        out[j + 1] = (v >> 8) & 0xFF
+        out[j + 2] = v & 0xFF
 
     # Command
-    out[offset] = int(command_code)
-    offset += 1
+    out[40] = int(command_code)
 
-    # Affected joints as bitfield byte
-    bitfield_val = 0
-    for i in range(8):
-        if _get_array_value(affected_joint_out, i, 0):
-            bitfield_val |= 1 << (7 - i)
-    out[offset] = bitfield_val
-    offset += 1
-
-    # In/Out as bitfield byte
-    bitfield_val = 0
-    for i in range(8):
-        if _get_array_value(inout_out, i, 0):
-            bitfield_val |= 1 << (7 - i)
-    out[offset] = bitfield_val
-    offset += 1
+    # Bitfields - manual packing avoids numpy allocation
+    out[41] = (
+        (int(bool(affected_joint_out[0])) << 7)
+        | (int(bool(affected_joint_out[1])) << 6)
+        | (int(bool(affected_joint_out[2])) << 5)
+        | (int(bool(affected_joint_out[3])) << 4)
+        | (int(bool(affected_joint_out[4])) << 3)
+        | (int(bool(affected_joint_out[5])) << 2)
+        | (int(bool(affected_joint_out[6])) << 1)
+        | int(bool(affected_joint_out[7]))
+    )
+    out[42] = (
+        (int(bool(inout_out[0])) << 7)
+        | (int(bool(inout_out[1])) << 6)
+        | (int(bool(inout_out[2])) << 5)
+        | (int(bool(inout_out[3])) << 4)
+        | (int(bool(inout_out[4])) << 3)
+        | (int(bool(inout_out[5])) << 2)
+        | (int(bool(inout_out[6])) << 1)
+        | int(bool(inout_out[7]))
+    )
 
     # Timeout
-    out[offset] = int(timeout_out) & 0xFF
-    offset += 1
+    out[43] = int(timeout_out) & 0xFF
 
     # Gripper: position, speed, current as 2 bytes each (big-endian)
-    for idx in range(3):
-        v = _get_array_value(gripper_data_out, idx, 0) & 0xFFFF
-        out[offset] = (v >> 8) & 0xFF
-        out[offset + 1] = v & 0xFF
-        offset += 2
+    g0 = int(gripper_data_out[0]) & 0xFFFF
+    g1 = int(gripper_data_out[1]) & 0xFFFF
+    g2 = int(gripper_data_out[2]) & 0xFFFF
+    out[44] = (g0 >> 8) & 0xFF
+    out[45] = g0 & 0xFF
+    out[46] = (g1 >> 8) & 0xFF
+    out[47] = g1 & 0xFF
+    out[48] = (g2 >> 8) & 0xFF
+    out[49] = g2 & 0xFF
 
     # Gripper command, mode, id
-    out[offset] = _get_array_value(gripper_data_out, 3, 0) & 0xFF
-    out[offset + 1] = _get_array_value(gripper_data_out, 4, 0) & 0xFF
-    out[offset + 2] = _get_array_value(gripper_data_out, 5, 0) & 0xFF
-    offset += 3
+    out[50] = int(gripper_data_out[3]) & 0xFF
+    out[51] = int(gripper_data_out[4]) & 0xFF
+    out[52] = int(gripper_data_out[5]) & 0xFF
 
-    # CRC (placeholder - unchanged from legacy)
-    out[offset] = 228
-    offset += 1
+    # CRC placeholder
+    out[53] = 228
 
     # End bytes
-    out[offset] = 0x01
-    out[offset + 1] = 0x02
+    out[54] = 0x01
+    out[55] = 0x02
 
 
 def unpack_rx_frame_into(
@@ -235,6 +214,7 @@ def unpack_rx_frame_into(
       - timing_out: shape (1,), dtype=int32
       - grip_out: shape (6,), dtype=int32 [device_id, pos, spd, cur, status, obj]
     """
+    global _UNPACK_BUF_B, _UNPACK_BUF_POS, _UNPACK_BUF_SPD
     try:
         if len(data) < 52:
             logger.warning(
@@ -245,27 +225,30 @@ def unpack_rx_frame_into(
         mv = memoryview(data)
 
         # Positions (0..17) and speeds (18..35), 3 bytes per value, big-endian signed 24-bit
-        b = np.frombuffer(mv[:36], dtype=np.uint8).reshape(12, 3)
-        pos3 = b[:6]
-        spd3 = b[6:]
+        # Use pre-allocated buffers to avoid per-call allocations
+        np.copyto(_UNPACK_BUF_B, np.frombuffer(mv[:36], dtype=np.uint8).reshape(12, 3))
 
-        pos = (
-            (pos3[:, 0].astype(np.int32) << 16)
-            | (pos3[:, 1].astype(np.int32) << 8)
-            | pos3[:, 2].astype(np.int32)
-        )
-        spd = (
-            (spd3[:, 0].astype(np.int32) << 16)
-            | (spd3[:, 1].astype(np.int32) << 8)
-            | spd3[:, 2].astype(np.int32)
-        )
+        # Decode positions: combine 3 bytes into int32 using pre-allocated buffer
+        # pos = (b0 << 16) | (b1 << 8) | b2
+        _UNPACK_BUF_POS[:] = _UNPACK_BUF_B[:6, 0]
+        _UNPACK_BUF_POS <<= 8
+        _UNPACK_BUF_POS |= _UNPACK_BUF_B[:6, 1]
+        _UNPACK_BUF_POS <<= 8
+        _UNPACK_BUF_POS |= _UNPACK_BUF_B[:6, 2]
 
-        # Sign-correct 24-bit to int32
-        pos[pos >= (1 << 23)] -= 1 << 24
-        spd[spd >= (1 << 23)] -= 1 << 24
+        # Decode speeds similarly
+        _UNPACK_BUF_SPD[:] = _UNPACK_BUF_B[6:, 0]
+        _UNPACK_BUF_SPD <<= 8
+        _UNPACK_BUF_SPD |= _UNPACK_BUF_B[6:, 1]
+        _UNPACK_BUF_SPD <<= 8
+        _UNPACK_BUF_SPD |= _UNPACK_BUF_B[6:, 2]
 
-        np.copyto(pos_out, pos, casting="no")
-        np.copyto(spd_out, spd, casting="no")
+        # Sign-correct 24-bit to int32 (in-place)
+        _UNPACK_BUF_POS[_UNPACK_BUF_POS >= _SIGN_THRESHOLD] -= _SIGN_ADJUST
+        _UNPACK_BUF_SPD[_UNPACK_BUF_SPD >= _SIGN_THRESHOLD] -= _SIGN_ADJUST
+
+        np.copyto(pos_out, _UNPACK_BUF_POS, casting="no")
+        np.copyto(spd_out, _UNPACK_BUF_SPD, casting="no")
 
         homed_byte = mv[36]
         io_byte = mv[37]

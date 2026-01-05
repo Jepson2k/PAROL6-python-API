@@ -1,74 +1,119 @@
+"""
+Integration tests for enablement detection via IK worker subprocess.
+"""
+
+import time
+
 import numpy as np
 import pytest
 
-from parol6.server.status_cache import StatusCache
-from parol6.server.state import ControllerState
+from parol6.config import steps_to_rad, LIMITS
+from parol6.server.ik_worker_client import IKWorkerClient
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
 
-@pytest.mark.unit
-def test_status_cache_includes_enablement_fields(monkeypatch):
-    cache = StatusCache()
+@pytest.mark.integration
+def test_ik_worker_detects_joint_limits():
+    """
+    Test that the IK worker correctly detects when a joint is near its limits.
 
-    # Patch heavy dependencies to be deterministic and fast
-    monkeypatch.setattr(
-        "parol6.server.status_cache.PAROL6_ROBOT",
-        type(
-            "_Dummy",
-            (),
-            {
-                "ops": type(
-                    "_Ops",
-                    (),
-                    {
-                        "steps_to_deg": staticmethod(lambda steps: [0.0] * 6),
-                        "steps_to_rad": staticmethod(lambda steps: [0.0] * 6),
-                    },
-                )(),
-                "robot": type(
-                    "_Robot", (), {"qlim": np.vstack([[-3.14] * 6, [3.14] * 6])}
-                )(),
-            },
-        ),
-        raising=True,
-    )
+    Joint enablement format: [J1+, J1-, J2+, J2-, ..., J6+, J6-]
+    - When near max limit: + direction disabled (0), - direction enabled (1)
+    - When near min limit: + direction enabled (1), - direction disabled (0)
+    """
+    client = IKWorkerClient()
+    client.start()
 
-    # Short-circuit fkine to avoid spatialmath calls
-    monkeypatch.setattr(
-        "parol6.server.status_cache.get_fkine_flat_mm",
-        lambda state: np.zeros((16,), dtype=float),
-        raising=True,
-    )
+    try:
+        time.sleep(0.2)
+        assert client.is_alive(), "IK worker failed to start"
 
-    # Patch enablement calculators to fixed values
-    def _fake_joint(cache_self, q_rad):  # type: ignore[no-redef]
-        bits = [1, 0] * 6
-        cache_self.joint_en[:] = np.asarray(bits, dtype=np.uint8)
-        cache_self._joint_en_ascii = ",".join(str(int(v)) for v in bits)
+        # Start from home position and move J1 near its max limit
+        from parol6.config import HOME_ANGLES_DEG
+        qlim = PAROL6_ROBOT.robot.qlim
 
-    def _fake_cart(cache_self, T, frame, q_rad):  # type: ignore[no-redef]
-        bits = [1] * 12 if frame == "WRF" else [0] * 12
-        ascii_bits = ",".join(str(b) for b in bits)
-        if frame == "WRF":
-            cache_self.cart_en_wrf[:] = np.asarray(bits, dtype=np.uint8)
-            cache_self._cart_en_wrf_ascii = ascii_bits
-        else:
-            cache_self.cart_en_trf[:] = np.asarray(bits, dtype=np.uint8)
-            cache_self._cart_en_trf_ascii = ascii_bits
+        q = np.deg2rad(HOME_ANGLES_DEG)
+        # Delta is 0.2 degrees = 0.0035 rad, so we need to be within that
+        q[0] = qlim[1, 0] - 0.001  # J1 very near max limit
 
-    monkeypatch.setattr(StatusCache, "_compute_joint_enable", _fake_joint, raising=True)
-    monkeypatch.setattr(StatusCache, "_compute_cart_enable", _fake_cart, raising=True)
+        T = PAROL6_ROBOT.robot.fkine(q)
+        T_matrix = T.A
 
-    # Trigger an update with a fresh state
-    state = ControllerState()
-    # Change Position_in so StatusCache treats it as an update (pos_changed=True)
-    arr = np.zeros((6,), dtype=np.int32)
-    arr[0] = 1
-    state.Position_in[:] = arr
-    cache.update_from_state(state)
+        client.submit_request(q, T_matrix)
 
-    txt = cache.to_ascii()
-    assert "JOINT_EN=" in txt
-    assert "CART_EN_WRF=" in txt and "CART_EN_TRF=" in txt
-    assert "JOINT_EN=1,0,1,0,1,0,1,0,1,0,1,0" in txt
-    assert "CART_EN_WRF=" + ",".join(["1"] * 12) in txt
-    assert "CART_EN_TRF=" + ",".join(["0"] * 12) in txt
+        result = None
+        for _ in range(100):
+            result = client.get_results_if_ready()
+            if result is not None:
+                break
+            time.sleep(0.01)
+
+        assert result is not None, "IK worker did not return results"
+        joint_en, _, _ = result
+
+        # J1 near max: J1+ should be disabled, J1- should be enabled
+        assert joint_en[0] == 0, f"J1+ should be disabled near max limit, got {joint_en[0]}"
+        assert joint_en[1] == 1, f"J1- should be enabled near max limit, got {joint_en[1]}"
+
+        # Now test J1 near min limit
+        q[0] = qlim[0, 0] + 0.001  # J1 very near min limit
+
+        T = PAROL6_ROBOT.robot.fkine(q)
+        T_matrix = T.A
+
+        client.submit_request(q, T_matrix)
+
+        result = None
+        for _ in range(100):
+            result = client.get_results_if_ready()
+            if result is not None:
+                break
+            time.sleep(0.01)
+
+        assert result is not None, "IK worker did not return results for min limit test"
+        joint_en, _, _ = result
+
+        # J1 near min: J1+ should be enabled, J1- should be disabled
+        assert joint_en[0] == 1, f"J1+ should be enabled near min limit, got {joint_en[0]}"
+        assert joint_en[1] == 0, f"J1- should be disabled near min limit, got {joint_en[1]}"
+
+    finally:
+        client.stop()
+
+
+@pytest.mark.integration
+def test_ik_worker_all_enabled_in_safe_position():
+    """
+    Test that all directions are enabled when robot is in the true center of its limits.
+    """
+    client = IKWorkerClient()
+    client.start()
+
+    try:
+        time.sleep(0.2)
+        assert client.is_alive()
+
+        # Use home position - a known safe position
+        from parol6.config import HOME_ANGLES_DEG
+        q_home = np.deg2rad(HOME_ANGLES_DEG)
+
+        T = PAROL6_ROBOT.robot.fkine(q_home)
+        T_matrix = T.A
+
+        client.submit_request(q_home, T_matrix)
+
+        result = None
+        for _ in range(50):
+            result = client.get_results_if_ready()
+            if result is not None:
+                break
+            time.sleep(0.01)
+
+        assert result is not None
+        joint_en, cart_en_wrf, cart_en_trf = result
+
+        # All joint directions should be enabled in true center position
+        assert np.all(joint_en == 1), f"All joints should be enabled at center, got {joint_en}"
+
+    finally:
+        client.stop()

@@ -29,7 +29,7 @@ class TestMoveCartIdempotence:
 
         # Move to the exact same pose - should result in zero angular distance
         # and effectively be a no-op
-        result = client.move_cartesian(current_pose, speed_percentage=50)
+        result = client.move_cartesian(current_pose, speed=50)
         assert result is True
 
         # Wait for completion (should be instant if duration is ~0)

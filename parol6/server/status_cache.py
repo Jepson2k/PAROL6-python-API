@@ -1,16 +1,20 @@
-import math
+"""
+Thread-safe cache of the aggregate STATUS payload components and formatted ASCII.
+
+The heavy IK enablement computations are delegated to a separate subprocess
+via IKWorkerClient for true CPU parallelism.
+"""
+
 import threading
 import time
 from typing import Any
 
 import numpy as np
-import sophuspy as sp
 from numpy.typing import ArrayLike
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_se3
-from parol6.utils.ik import AXIS_MAP, solve_ik
-from parol6.utils.se3_utils import se3_from_trans, se3_rx, se3_ry, se3_rz
+from parol6.config import steps_to_deg, steps_to_rad
+from parol6.server.ik_worker_client import IKWorkerClient
+from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_matrix
 
 
 class StatusCache:
@@ -75,97 +79,23 @@ class StatusCache:
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
         self._last_pos_in: np.ndarray = np.zeros((6,), dtype=np.int32)
 
+        # IK worker client for async enablement computation (lazy-started on first request)
+        self._ik_client = IKWorkerClient()
+
+    def __del__(self) -> None:
+        """Clean up IK worker on destruction."""
+        if hasattr(self, '_ik_client') and self._ik_client:
+            self._ik_client.stop()
+
     def _format_csv_from_list(self, vals: ArrayLike) -> str:
-        # Using str() on each value preserves prior formatting semantics
         return ",".join(str(v) for v in vals)  # type: ignore
-
-    def _compute_joint_enable(
-        self, q_rad: np.ndarray, delta_rad: float = math.radians(0.2)
-    ) -> None:
-        """Compute per-joint +/- enable bits based on joint limits and a small delta."""
-        # Be robust to uninitialized robot in type-checked context
-        robot: Any = getattr(PAROL6_ROBOT, "robot", None)
-        if robot is None:
-            self.joint_en[:] = 1
-            return
-        qlim = getattr(robot, "qlim", None)
-        if qlim is None:
-            self.joint_en[:] = 1
-            return
-        allow_plus = (q_rad + delta_rad) <= qlim[1, :]
-        allow_minus = (q_rad - delta_rad) >= qlim[0, :]
-        # Pack into [J1+,J1-,J2+,J2-,...,J6+,J6-]
-        bits = []
-        for i in range(6):
-            bits.append(1 if allow_plus[i] else 0)
-            bits.append(1 if allow_minus[i] else 0)
-        self.joint_en[:] = np.asarray(bits, dtype=np.uint8)
-        self._joint_en_ascii = self._format_csv_from_list(self.joint_en.tolist())
-
-    def _compute_cart_enable(
-        self,
-        T: sp.SE3,
-        frame: str,
-        q_rad: np.ndarray,
-        delta_mm: float = 0.5,
-        delta_deg: float = 0.5,
-    ) -> None:
-        """Compute per-axis +/- enable bits for the given frame (WRF/TRF) via small-step IK."""
-        bits = []
-        # Build small delta transforms
-        t_step_m = delta_mm / 1000.0
-        r_step_rad = math.radians(delta_deg)
-        for axis, (v_lin, v_rot) in AXIS_MAP.items():
-            # Compose delta SE3 for this axis - start with identity
-            dT = sp.SE3()
-            # Translation
-            dx = v_lin[0] * t_step_m
-            dy = v_lin[1] * t_step_m
-            dz = v_lin[2] * t_step_m
-            if abs(dx) > 0 or abs(dy) > 0 or abs(dz) > 0:
-                dT = dT * se3_from_trans(dx, dy, dz)
-            # Rotation
-            rx = v_rot[0] * r_step_rad
-            ry = v_rot[1] * r_step_rad
-            rz = v_rot[2] * r_step_rad
-            if abs(rx) > 0:
-                dT = dT * se3_rx(rx)
-            if abs(ry) > 0:
-                dT = dT * se3_ry(ry)
-            if abs(rz) > 0:
-                dT = dT * se3_rz(rz)
-
-            # Apply in specified frame
-            if frame == "WRF":
-                T_target = dT * T
-            else:  # TRF
-                T_target = T * dT
-
-            try:
-                ik = solve_ik(
-                    PAROL6_ROBOT.robot,
-                    T_target,
-                    q_rad,
-                    jogging=True,
-                    quiet_logging=True,
-                )
-                bits.append(1 if ik.success else 0)
-            except Exception:
-                bits.append(0)
-
-        arr = np.asarray(bits, dtype=np.uint8)
-        if frame == "WRF":
-            self.cart_en_wrf[:] = arr
-            self._cart_en_wrf_ascii = self._format_csv_from_list(arr.tolist())
-        else:
-            self.cart_en_trf[:] = arr
-            self._cart_en_trf_ascii = self._format_csv_from_list(arr.tolist())
 
     def update_from_state(self, state: ControllerState) -> None:
         """
         Update cache from current controller state with change gating:
-          - Only recompute angles/pose when Position_in changes (and beyond optional deadband)
+          - Only recompute angles/pose when Position_in changes
           - Only refresh IO/speeds/gripper when their inputs actually change
+          - IK enablement is computed asynchronously in a subprocess
         """
         now = time.time()
         changed_any = False
@@ -185,34 +115,37 @@ class StatusCache:
 
                 # Vectorized steps->deg
                 self.angles_deg = np.asarray(
-                    PAROL6_ROBOT.ops.steps_to_deg(state.Position_in)
-                )  # float64, shape (6,)
-                # Publish angles list and ASCII
+                    steps_to_deg(state.Position_in)
+                )
                 self._angles_ascii = self._format_csv_from_list(self.angles_deg)
                 changed_any = True
 
                 # Get cached fkine (automatically updates if needed)
-                pose_flat_mm = get_fkine_flat_mm(state)  # Already in mm for translation
+                pose_flat_mm = get_fkine_flat_mm(state)
                 np.copyto(self.pose, pose_flat_mm)
                 self._pose_ascii = self._format_csv_from_list(self.pose)
                 changed_any = True
 
-                # Compute enablement arrays at 50 Hz when pose/angles change
+                # Submit IK request asynchronously
                 try:
                     q_rad = np.asarray(
-                        PAROL6_ROBOT.ops.steps_to_rad(state.Position_in), dtype=float
+                        steps_to_rad(state.Position_in), dtype=float
                     )
+                    T_matrix = get_fkine_matrix(state)
+                    self._ik_client.submit_request(q_rad, T_matrix)
                 except Exception:
-                    q_rad = np.zeros((6,), dtype=float)
-                try:
-                    T = get_fkine_se3(state)
-                except Exception:
-                    T = sp.SE3()  # Identity
-                # JOINT_EN
-                self._compute_joint_enable(q_rad)
-                # CART_EN for both frames
-                self._compute_cart_enable(T, "WRF", q_rad)
-                self._compute_cart_enable(T, "TRF", q_rad)
+                    pass  # IK request failed, will use cached values
+
+            # Poll for async IK results (non-blocking)
+            results = self._ik_client.get_results_if_ready()
+            if results is not None:
+                self.joint_en[:] = results[0]
+                self.cart_en_wrf[:] = results[1]
+                self.cart_en_trf[:] = results[2]
+                self._joint_en_ascii = self._format_csv_from_list(self.joint_en.tolist())
+                self._cart_en_wrf_ascii = self._format_csv_from_list(self.cart_en_wrf.tolist())
+                self._cart_en_trf_ascii = self._format_csv_from_list(self.cart_en_trf.tolist())
+                changed_any = True
 
             # 2) IO (first 5)
             if not np.array_equal(self.io, state.InOut_in[:5]):
@@ -264,15 +197,13 @@ class StatusCache:
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""
-        with self._lock:
-            self.last_serial_s = time.time()
+        self.last_serial_s = time.time()
 
     def age_s(self) -> float:
         """Seconds since last fresh serial observation (used to gate broadcasting)."""
-        with self._lock:
-            if self.last_serial_s <= 0:
-                return 1e9
-            return time.time() - self.last_serial_s
+        if self.last_serial_s <= 0:
+            return 1e9
+        return time.time() - self.last_serial_s
 
 
 # Module-level singleton

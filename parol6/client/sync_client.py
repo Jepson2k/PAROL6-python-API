@@ -302,6 +302,28 @@ class RobotClient:
         """
         return _run(self._inner.set_tool(tool_name))
 
+    def set_profile(self, profile: str) -> bool:
+        """
+        Set the system-wide motion profile.
+
+        Args:
+            profile: Motion profile type ('RUCKIG', 'QUINTIC', 'TRAPEZOID', 'NONE')
+
+        Returns:
+            True if successful
+        """
+        return _run(self._inner.set_profile(profile))
+
+    def get_profile(self) -> str | None:
+        """
+        Get the current system-wide motion profile.
+
+        Returns:
+            Current motion profile ('RUCKIG', 'QUINTIC', 'TRAPEZOID', 'NONE'),
+            or None on timeout.
+        """
+        return _run(self._inner.get_profile())
+
     def get_current_action(self) -> dict | None:
         """
         Get the current executing action/command and its state.
@@ -361,7 +383,7 @@ class RobotClient:
     def wait_motion_complete(
         self,
         timeout: float = 90.0,
-        settle_window: float = 1.0,
+        settle_window: float = 0.25,
         speed_threshold: float = 2.0,
         angle_threshold: float = 0.5,
     ) -> bool:
@@ -421,8 +443,8 @@ class RobotClient:
         self,
         joint_angles: list[float],
         duration: float | None = None,
-        speed_percentage: int | None = None,
-        accel_percentage: int | None = None,
+        speed: int | None = None,
+        accel: int | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
@@ -431,8 +453,8 @@ class RobotClient:
         Args:
             joint_angles: Target joint angles in degrees [J1-J6].
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            accel_percentage: Acceleration as percentage (1-100).
+            speed: Speed as percentage (1-100).
+            accel: Acceleration as percentage (1-100).
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -443,8 +465,8 @@ class RobotClient:
             self._inner.move_joints(
                 joint_angles,
                 duration,
-                speed_percentage,
-                accel_percentage,
+                speed,
+                accel,
                 wait=wait,
                 **wait_kwargs,
             )
@@ -454,8 +476,8 @@ class RobotClient:
         self,
         pose: list[float],
         duration: float | None = None,
-        speed_percentage: int | None = None,
-        accel_percentage: int | None = None,
+        speed: int | None = None,
+        accel: int | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
@@ -464,8 +486,8 @@ class RobotClient:
         Args:
             pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees.
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            accel_percentage: Acceleration as percentage (1-100).
+            speed: Speed as percentage (1-100).
+            accel: Acceleration as percentage (1-100).
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -476,8 +498,8 @@ class RobotClient:
             self._inner.move_pose(
                 pose,
                 duration,
-                speed_percentage,
-                accel_percentage,
+                speed,
+                accel,
                 wait=wait,
                 **wait_kwargs,
             )
@@ -487,8 +509,8 @@ class RobotClient:
         self,
         pose: list[float],
         duration: float | None = None,
-        speed_percentage: float | None = None,
-        accel_percentage: int | None = None,
+        speed: float | None = None,
+        accel: int | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
@@ -497,8 +519,8 @@ class RobotClient:
         Args:
             pose: Target pose [x, y, z, rx, ry, rz] in mm and degrees.
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            accel_percentage: Acceleration as percentage (1-100).
+            speed: Speed as percentage (1-100).
+            accel: Acceleration as percentage (1-100).
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -509,8 +531,8 @@ class RobotClient:
             self._inner.move_cartesian(
                 pose,
                 duration,
-                speed_percentage,
-                accel_percentage,
+                speed,
+                accel,
                 wait=wait,
                 **wait_kwargs,
             )
@@ -520,8 +542,8 @@ class RobotClient:
         self,
         deltas: list[float],
         duration: float | None = None,
-        speed_percentage: float | None = None,
-        accel_percentage: int | None = None,
+        speed: float | None = None,
+        accel: int | None = None,
         profile: str | None = None,
         tracking: str | None = None,
         wait: bool = False,
@@ -532,8 +554,8 @@ class RobotClient:
         Args:
             deltas: Relative movement [dx, dy, dz, rx, ry, rz] in mm and degrees.
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            accel_percentage: Acceleration as percentage (1-100).
+            speed: Speed as percentage (1-100).
+            accel: Acceleration as percentage (1-100).
             profile: Motion profile type.
             tracking: Tracking mode.
             wait: If True, block until motion completes.
@@ -546,8 +568,8 @@ class RobotClient:
             self._inner.move_cartesian_rel_trf(
                 deltas,
                 duration,
-                speed_percentage,
-                accel_percentage,
+                speed,
+                accel,
                 profile,
                 tracking,
                 wait=wait,
@@ -558,7 +580,7 @@ class RobotClient:
     def jog_joint(
         self,
         joint_index: int,
-        speed_percentage: int,
+        speed: int,
         duration: float | None = None,
         distance_deg: float | None = None,
     ) -> bool:
@@ -566,7 +588,7 @@ class RobotClient:
 
         Args:
             joint_index: Joint to jog (0-5 positive, 6-11 negative direction).
-            speed_percentage: Speed as percentage (1-100).
+            speed: Speed as percentage (1-100).
             duration: Time to jog in seconds.
             distance_deg: Distance to jog in degrees.
 
@@ -576,7 +598,7 @@ class RobotClient:
         return _run(
             self._inner.jog_joint(
                 joint_index,
-                speed_percentage,
+                speed,
                 duration,
                 distance_deg,
             )
@@ -586,7 +608,7 @@ class RobotClient:
         self,
         frame: Frame,
         axis: Axis,
-        speed_percentage: int,
+        speed: int,
         duration: float,
     ) -> bool:
         """Jog the robot in Cartesian space along a specified axis.
@@ -594,13 +616,13 @@ class RobotClient:
         Args:
             frame: Reference frame ('TRF' for Tool, 'WRF' for World).
             axis: Axis and direction to jog (e.g., 'X+', 'Y-', 'RZ+').
-            speed_percentage: Speed as percentage (1-100).
+            speed: Speed as percentage (1-100).
             duration: Time to jog in seconds.
 
         Returns:
             True if command sent successfully.
         """
-        return _run(self._inner.jog_cartesian(frame, axis, speed_percentage, duration))
+        return _run(self._inner.jog_cartesian(frame, axis, speed, duration))
 
     def jog_multiple(
         self,
@@ -762,16 +784,15 @@ class RobotClient:
         frame: Literal["WRF", "TRF"] = "WRF",
         center_mode: Literal["ABSOLUTE", "TOOL", "RELATIVE"] = "ABSOLUTE",
         entry_mode: Literal["AUTO", "TANGENT", "DIRECT", "NONE"] = "NONE",
-        start_pose: list[float] | None = None,
         duration: float | None = None,
-        speed_percentage: float | None = None,
+        speed: float | None = None,
         clockwise: bool = False,
-        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: float | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
         """Execute a smooth circular motion.
+
+        Uses system motion profile (set via set_profile()).
 
         Args:
             center: Circle center [x, y, z] in mm.
@@ -780,12 +801,9 @@ class RobotClient:
             frame: Reference frame ('WRF' or 'TRF').
             center_mode: How to interpret center point.
             entry_mode: How to approach circle if not on perimeter.
-            start_pose: Optional start pose [x, y, z, rx, ry, rz].
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
+            speed: Speed as percentage (1-100).
             clockwise: Direction of motion.
-            trajectory_type: Trajectory type ('cubic', 'quintic', 's_curve').
-            jerk_limit: Optional jerk limit for s_curve.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -800,12 +818,9 @@ class RobotClient:
                 frame=frame,
                 center_mode=center_mode,
                 entry_mode=entry_mode,
-                start_pose=start_pose,
                 duration=duration,
-                speed_percentage=speed_percentage,
+                speed=speed,
                 clockwise=clockwise,
-                trajectory_type=trajectory_type,
-                jerk_limit=jerk_limit,
                 wait=wait,
                 **wait_kwargs,
             )
@@ -816,27 +831,23 @@ class RobotClient:
         end_pose: list[float],
         center: list[float],
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: list[float] | None = None,
         duration: float | None = None,
-        speed_percentage: float | None = None,
+        speed: float | None = None,
         clockwise: bool = False,
-        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: float | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
         """Execute a smooth arc motion defined by center point.
 
+        Uses system motion profile (set via set_profile()).
+
         Args:
             end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
             center: Arc center [x, y, z] in mm.
             frame: Reference frame ('WRF' or 'TRF').
-            start_pose: Optional start pose.
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
+            speed: Speed as percentage (1-100).
             clockwise: Direction of motion.
-            trajectory_type: Trajectory type.
-            jerk_limit: Optional jerk limit for s_curve.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -848,12 +859,9 @@ class RobotClient:
                 end_pose=end_pose,
                 center=center,
                 frame=frame,
-                start_pose=start_pose,
                 duration=duration,
-                speed_percentage=speed_percentage,
+                speed=speed,
                 clockwise=clockwise,
-                trajectory_type=trajectory_type,
-                jerk_limit=jerk_limit,
                 wait=wait,
                 **wait_kwargs,
             )
@@ -865,27 +873,23 @@ class RobotClient:
         radius: float,
         arc_angle: float,
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: list[float] | None = None,
         duration: float | None = None,
-        speed_percentage: float | None = None,
-        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: float | None = None,
+        speed: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
         """Execute a smooth arc motion defined parametrically.
 
+        Uses system motion profile (set via set_profile()).
+
         Args:
             end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
             radius: Arc radius in mm.
             arc_angle: Arc angle in degrees.
             frame: Reference frame ('WRF' or 'TRF').
-            start_pose: Optional start pose.
             duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            trajectory_type: Trajectory type.
-            jerk_limit: Optional jerk limit for s_curve.
+            speed: Speed as percentage (1-100).
             clockwise: Direction of motion.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
@@ -899,11 +903,8 @@ class RobotClient:
                 radius=radius,
                 arc_angle=arc_angle,
                 frame=frame,
-                start_pose=start_pose,
                 duration=duration,
-                speed_percentage=speed_percentage,
-                trajectory_type=trajectory_type,
-                jerk_limit=jerk_limit,
+                speed=speed,
                 clockwise=clockwise,
                 wait=wait,
                 **wait_kwargs,
@@ -914,24 +915,20 @@ class RobotClient:
         self,
         waypoints: list[list[float]],
         frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: list[float] | None = None,
         duration: float | None = None,
-        speed_percentage: float | None = None,
-        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: float | None = None,
+        speed: float | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
         """Execute a smooth spline motion through waypoints.
 
+        Uses system motion profile (set via set_profile()).
+
         Args:
             waypoints: List of poses [x, y, z, rx, ry, rz] in mm and degrees.
             frame: Reference frame ('WRF' or 'TRF').
-            start_pose: Optional start pose.
             duration: Total time for motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            trajectory_type: Trajectory type.
-            jerk_limit: Optional jerk limit for s_curve.
+            speed: Speed as percentage (1-100).
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -942,152 +939,8 @@ class RobotClient:
             self._inner.smooth_spline(
                 waypoints=waypoints,
                 frame=frame,
-                start_pose=start_pose,
                 duration=duration,
-                speed_percentage=speed_percentage,
-                trajectory_type=trajectory_type,
-                jerk_limit=jerk_limit,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def smooth_helix(
-        self,
-        center: list[float],
-        radius: float,
-        pitch: float,
-        height: float,
-        frame: Literal["WRF", "TRF"] = "WRF",
-        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "cubic",
-        jerk_limit: float | None = None,
-        start_pose: list[float] | None = None,
-        duration: float | None = None,
-        speed_percentage: float | None = None,
-        clockwise: bool = False,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a smooth helical motion.
-
-        Args:
-            center: Helix center [x, y, z] in mm.
-            radius: Helix radius in mm.
-            pitch: Vertical distance per revolution in mm.
-            height: Total height of helix in mm.
-            frame: Reference frame ('WRF' or 'TRF').
-            trajectory_type: Trajectory type.
-            jerk_limit: Optional jerk limit for s_curve.
-            start_pose: Optional start pose.
-            duration: Time to complete motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            clockwise: Direction of motion.
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_helix(
-                center=center,
-                radius=radius,
-                pitch=pitch,
-                height=height,
-                frame=frame,
-                trajectory_type=trajectory_type,
-                jerk_limit=jerk_limit,
-                start_pose=start_pose,
-                duration=duration,
-                speed_percentage=speed_percentage,
-                clockwise=clockwise,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def smooth_blend(
-        self,
-        segments: list[dict],
-        blend_time: float = 0.5,
-        frame: Literal["WRF", "TRF"] = "WRF",
-        start_pose: list[float] | None = None,
-        duration: float | None = None,
-        speed_percentage: float | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a blended motion through multiple segments.
-
-        Args:
-            segments: List of segment dictionaries.
-            blend_time: Time to blend between segments in seconds.
-            frame: Reference frame ('WRF' or 'TRF').
-            start_pose: Optional start pose.
-            duration: Total time for motion in seconds.
-            speed_percentage: Speed as percentage (1-100).
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_blend(
-                segments=segments,
-                blend_time=blend_time,
-                frame=frame,
-                start_pose=start_pose,
-                duration=duration,
-                speed_percentage=speed_percentage,
-                wait=wait,
-                **wait_kwargs,
-            )
-        )
-
-    def smooth_waypoints(
-        self,
-        waypoints: list[list[float]],
-        blend_radii: Literal["AUTO"] | list[float] = "AUTO",
-        blend_mode: Literal["parabolic", "circular", "none"] = "parabolic",
-        via_modes: list[str] | None = None,
-        max_velocity: float = 100.0,
-        max_acceleration: float = 500.0,
-        frame: Literal["WRF", "TRF"] = "WRF",
-        trajectory_type: Literal["cubic", "quintic", "s_curve"] = "quintic",
-        duration: float | None = None,
-        wait: bool = False,
-        **wait_kwargs,
-    ) -> bool:
-        """Execute a waypoint trajectory with blending.
-
-        Args:
-            waypoints: List of poses [x, y, z, rx, ry, rz] in mm and degrees.
-            blend_radii: Blend radii for intermediate waypoints ('AUTO' or list).
-            blend_mode: Blending mode ('parabolic', 'circular', 'none').
-            via_modes: List of 'via' or 'stop' for each waypoint.
-            max_velocity: Maximum velocity.
-            max_acceleration: Maximum acceleration.
-            frame: Reference frame ('WRF' or 'TRF').
-            trajectory_type: Trajectory type.
-            duration: Total time for motion in seconds.
-            wait: If True, block until motion completes.
-            **wait_kwargs: Arguments passed to wait_motion_complete().
-
-        Returns:
-            True if command sent successfully.
-        """
-        return _run(
-            self._inner.smooth_waypoints(
-                waypoints=waypoints,
-                blend_radii=blend_radii,
-                blend_mode=blend_mode,
-                via_modes=via_modes,
-                max_velocity=max_velocity,
-                max_acceleration=max_acceleration,
-                frame=frame,
-                trajectory_type=trajectory_type,
-                duration=duration,
+                speed=speed,
                 wait=wait,
                 **wait_kwargs,
             )

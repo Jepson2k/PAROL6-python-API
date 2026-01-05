@@ -34,7 +34,7 @@ class TestJogSpeedExtremes:
         # Jog J1 at slowest speed (1%) for a short duration
         result = client.jog_joint(
             joint_index=0,  # J1 positive direction
-            speed_percentage=1,  # Slowest speed
+            speed=1,  # Slowest speed
             duration=0.5,  # Half second jog
         )
         assert result is True, "Jog command failed to send"
@@ -69,7 +69,7 @@ class TestJogSpeedExtremes:
         # Jog J1 at fastest speed (100%) for a short duration
         result = client.jog_joint(
             joint_index=0,  # J1 positive direction
-            speed_percentage=100,  # Fastest speed
+            speed=100,  # Fastest speed
             duration=0.5,  # Half second jog
         )
         assert result is True, "Jog command failed to send"
@@ -100,7 +100,7 @@ class TestJogSpeedExtremes:
         initial_angles_slow = client.get_angles()
         assert initial_angles_slow is not None
 
-        result = client.jog_joint(joint_index=0, speed_percentage=10, duration=0.3)
+        result = client.jog_joint(joint_index=0, speed=10, duration=0.3)
         assert result is True
         time.sleep(0.8)
 
@@ -112,7 +112,7 @@ class TestJogSpeedExtremes:
         initial_angles_fast = client.get_angles()
         assert initial_angles_fast is not None
 
-        result = client.jog_joint(joint_index=0, speed_percentage=90, duration=0.3)
+        result = client.jog_joint(joint_index=0, speed=90, duration=0.3)
         assert result is True
         time.sleep(0.8)
 
@@ -148,8 +148,8 @@ class TestCartesianJogSpeedExtremes:
         # Cartesian jog in +X direction at slowest speed (1%)
         result = client.jog_cartesian(
             frame="WRF",
-            axis="X+",
-            speed_percentage=1,  # Slowest speed
+            axis="Y+",
+            speed=2,  # Slowest speed
             duration=1,
         )
         assert result is True, "Cartesian jog command failed to send"
@@ -185,7 +185,7 @@ class TestCartesianJogSpeedExtremes:
         result = client.jog_cartesian(
             frame="WRF",
             axis="X+",
-            speed_percentage=100,  # Fastest speed
+            speed=100,  # Fastest speed
             duration=0.5,  # Half second jog
         )
         assert result is True, "Cartesian jog command failed to send"

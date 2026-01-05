@@ -156,7 +156,7 @@ class TestBasicMotionCommands:
         """Test basic pose movement command with validation."""
         result = client.move_pose(
             [100, 100, 100, 0, 0, 0],
-            speed_percentage=50,
+            speed=50,
         )
         assert result is True
 

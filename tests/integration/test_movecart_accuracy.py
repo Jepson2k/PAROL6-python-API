@@ -39,7 +39,7 @@ class TestMoveCartAccuracy:
         target = [0.000, 263, 242, 90, 0, 90]
 
         # Execute movecart
-        result = client.move_cartesian(target, speed_percentage=50)
+        result = client.move_cartesian(target, speed=50)
         assert result is True
 
         # Wait for completion
@@ -94,7 +94,7 @@ class TestMoveCartAccuracy:
             print(f"Moving to: {target}")
 
             # Execute movecart
-            result = client.move_cartesian(target, speed_percentage=30)
+            result = client.move_cartesian(target, speed=30)
             assert result is True
 
             # Wait for completion

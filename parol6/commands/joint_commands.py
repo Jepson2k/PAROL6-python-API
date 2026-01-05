@@ -1,51 +1,104 @@
 """
 Joint Movement Commands
-Contains commands for direct joint angle movements
+Contains commands for joint-space movements with unified trajectory execution.
+
+Uses unified motion pipeline with TOPP-RA for time-optimal path parameterization.
+All commands inherit from JointMoveCommandBase which uses MotionExecutor for
+jerk-limited smoothing during execution.
 """
 
+from __future__ import annotations
+
 import logging
+from abc import abstractmethod
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.commands.base import ExecutionStatus, MotionCommand, MotionProfile
-from parol6.config import DEFAULT_ACCEL_PERCENT, INTERVAL_S, TRACE
+from parol6.commands.base import TrajectoryMoveCommandBase, parse_opt_float
+from parol6.config import DEFAULT_ACCEL_PERCENT, INTERVAL_S, LIMITS, steps_to_rad
+from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.server.command_registry import register_command
-from parol6.server.state import ControllerState
+from parol6.utils.errors import IKError
+from parol6.utils.ik import solve_ik
+from parol6.utils.se3_utils import se3_from_rpy
+
+if TYPE_CHECKING:
+    from parol6.server.state import ControllerState
 
 logger = logging.getLogger(__name__)
 
 
-@register_command("MOVEJOINT")
-class MoveJointCommand(MotionCommand):
-    """
-    A non-blocking command to move the robot's joints to a specific configuration.
-    It pre-calculates the entire trajectory upon initialization.
+class JointMoveCommandBase(TrajectoryMoveCommandBase):
+    """Base class for joint-space trajectory commands.
+
+    Subclasses must implement:
+    - do_match(): Parse command parameters
+    - _get_target_rad(): Return target joint positions in radians
+
+    This base class provides:
+    - do_setup(): Builds trajectory via JointPath.interpolate + TrajectoryBuilder
+    - execute_step(): Inherited from TrajectoryMoveCommandBase (uses MotionExecutor)
     """
 
-    __slots__ = (
-        "command_step",
-        "trajectory_steps",
-        "target_angles",
-        "target_radians",
-        "duration",
-        "velocity_percent",
-        "accel_percent",
-        "trajectory_type",
-    )
+    __slots__ = ("duration", "velocity_percent", "accel_percent")
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.command_step = 0
-        self.trajectory_steps: np.ndarray = np.empty((0, 6), dtype=np.int32)
+        self.duration: float | None = None
+        self.velocity_percent: float | None = None
+        self.accel_percent: float = DEFAULT_ACCEL_PERCENT
 
-        # Parameters (set in do_match())
-        self.target_angles = None
-        self.target_radians = None
-        self.duration = None
-        self.velocity_percent = None
-        self.accel_percent = DEFAULT_ACCEL_PERCENT
-        self.trajectory_type = "trapezoid"
+    @abstractmethod
+    def _get_target_rad(self, state: ControllerState) -> np.ndarray:
+        """Return target joint positions in radians."""
+        ...
+
+    def do_setup(self, state: ControllerState) -> None:
+        """Build trajectory from current position to target using unified motion pipeline."""
+        current_rad = np.asarray(
+            steps_to_rad(state.Position_in), dtype=np.float64
+        )
+        target_rad = self._get_target_rad(state)
+
+        profile = state.motion_profile
+        accel_pct = float(self.accel_percent) if self.accel_percent else DEFAULT_ACCEL_PERCENT
+
+        joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)
+        builder = TrajectoryBuilder(
+            joint_path=joint_path,
+            profile=profile,
+            velocity_percent=self.velocity_percent,
+            accel_percent=accel_pct,
+            duration=self.duration,
+            dt=INTERVAL_S,
+        )
+
+        trajectory = builder.build()
+        self.trajectory_steps = trajectory.steps
+
+        if len(self.trajectory_steps) == 0:
+            raise ValueError("Trajectory calculation resulted in no steps.")
+
+        self.log_trace(
+            "  -> Using profile: %s, duration: %.3fs, steps: %d",
+            profile,
+            trajectory.duration,
+            len(self.trajectory_steps),
+        )
+
+
+@register_command("MOVEJOINT")
+class MoveJointCommand(JointMoveCommandBase):
+    """Move the robot's joints to a specific configuration."""
+
+    __slots__ = ("target_angles", "target_radians")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.target_angles: np.ndarray | None = None
+        self.target_radians: np.ndarray | None = None
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
         """
@@ -53,12 +106,6 @@ class MoveJointCommand(MotionCommand):
 
         Format: MOVEJOINT|j1|j2|j3|j4|j5|j6|duration|speed|accel
         Example: MOVEJOINT|0|45|90|-45|30|0|None|50|50
-
-        Args:
-            parts: Pre-split message parts
-
-        Returns:
-            Tuple of (can_handle, error_message)
         """
         if len(parts) != 10:
             return (
@@ -66,105 +113,93 @@ class MoveJointCommand(MotionCommand):
                 "MOVEJOINT requires 9 parameters: 6 joint angles, duration, speed, accel",
             )
 
-        # Parse joint angles
         self.target_angles = np.asarray(
             [float(parts[i]) for i in range(1, 7)], dtype=float
         )
 
-        # Parse duration and speed
-        self.duration = None if parts[7].upper() == "NONE" else float(parts[7])
-        self.velocity_percent = None if parts[8].upper() == "NONE" else float(parts[8])
+        self.duration = parse_opt_float(parts[7])
+        self.velocity_percent = parse_opt_float(parts[8])
+        self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
 
-        # Parse acceleration
-        self.accel_percent = float(parts[9]) if parts[9].upper() != "NONE" else DEFAULT_ACCEL_PERCENT
-
-        # Validate joint limits
         self.target_radians = np.deg2rad(self.target_angles)
         for i in range(6):
-            min_rad, max_rad = PAROL6_ROBOT.joint.limits.rad[i]
+            min_rad, max_rad = LIMITS.joint.position.rad[i]
             if not (min_rad <= self.target_radians[i] <= max_rad):
                 return (
                     False,
                     f"Joint {i + 1} target ({self.target_angles[i]} deg) is out of range",
                 )
 
-        self.log_debug("Parsed MoveJoint: %s, accel=%s%%", self.target_angles, self.accel_percent)
+        self.log_debug(
+            "Parsed MoveJoint: %s, accel=%s%%", self.target_angles, self.accel_percent
+        )
         self.is_valid = True
         return (True, None)
 
-    def do_setup(self, state: "ControllerState") -> None:
-        """Calculates the trajectory just before execution begins."""
-        self.log_trace(
-            "Preparing trajectory for MoveJoint to %s...", self.target_angles
-        )
+    def _get_target_rad(self, state: ControllerState) -> np.ndarray:
+        """Return target joint positions in radians."""
+        return np.asarray(self.target_radians, dtype=np.float64)
 
-        if self.duration and self.duration > 0:
-            if self.velocity_percent is not None:
-                self.log_trace(
-                    "  -> INFO: Both duration and velocity were provided. Using duration."
-                )
-            initial_pos_steps = state.Position_in
-            target_pos_steps = np.asarray(
-                PAROL6_ROBOT.ops.rad_to_steps(self.target_radians), dtype=np.int32
-            )
-            dur = float(self.duration)
-            self.trajectory_steps = MotionProfile.from_duration_steps(
-                initial_pos_steps, target_pos_steps, dur, dt=INTERVAL_S
-            )
 
-        elif self.velocity_percent is not None:
-            initial_pos_steps = state.Position_in
-            target_pos_steps = np.asarray(
-                PAROL6_ROBOT.ops.rad_to_steps(self.target_radians), dtype=np.int32
-            )
-            accel_percent = (
-                float(self.accel_percent)
-                if self.accel_percent is not None
-                else float(DEFAULT_ACCEL_PERCENT)
-            )
-            self.trajectory_steps = MotionProfile.from_velocity_percent(
-                initial_pos_steps,
-                target_pos_steps,
-                float(self.velocity_percent),
-                accel_percent,
-                dt=INTERVAL_S,
-            )
-            self.log_trace("  -> Command is valid (duration calculated from speed).")
+@register_command("MOVEPOSE")
+class MovePoseCommand(JointMoveCommandBase):
+    """Move the robot to a specific Cartesian pose via joint-space interpolation.
 
-        else:
-            logger.log(TRACE, "  -> Using conservative values for MoveJoint.")
-            command_len = 200
-            initial_pos_steps = state.Position_in
-            target_pos_steps = np.asarray(
-                PAROL6_ROBOT.ops.rad_to_steps(self.target_radians), dtype=np.int32
-            )
-            total_dur = float(command_len) * INTERVAL_S
-            self.trajectory_steps = MotionProfile.from_duration_steps(
-                initial_pos_steps, target_pos_steps, total_dur, dt=INTERVAL_S
-            )
+    Uses IK to find the target joint configuration, then interpolates in joint space.
+    This is different from MoveCart which follows a straight-line Cartesian path.
+    """
 
-        if len(self.trajectory_steps) == 0:
-            raise ValueError(
-                "Trajectory calculation resulted in no steps. Command is invalid."
-            )
-        self.log_trace(
-            " -> Trajectory prepared with %s steps.", len(self.trajectory_steps)
-        )
+    __slots__ = ("pose",)
 
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        if self.is_finished or not self.is_valid:
+    def __init__(self, pose: list[float] | None = None, duration: float | None = None) -> None:
+        super().__init__()
+        self.pose: list[float] | None = pose
+        self.duration = duration
+
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+        """
+        Parse MOVEPOSE command parameters.
+
+        Format: MOVEPOSE|x|y|z|rx|ry|rz|duration|speed|accel
+        Example: MOVEPOSE|100|200|300|0|0|0|None|50|50
+        """
+        if len(parts) != 10:
             return (
-                ExecutionStatus.completed("Already finished")
-                if self.is_finished
-                else ExecutionStatus.failed("Invalid command")
+                False,
+                "MOVEPOSE requires 9 parameters: x, y, z, rx, ry, rz, duration, speed, accel",
             )
 
-        if self.command_step >= len(self.trajectory_steps):
-            logger.log(TRACE, f"{type(self).__name__} finished.")
-            self.is_finished = True
-            self.stop_and_idle(state)
-            return ExecutionStatus.completed("MOVEJOINT")
-        else:
-            self.set_move_position(state, self.trajectory_steps[self.command_step])
-            self.command_step += 1
-            return ExecutionStatus.executing("MOVEJOINT")
+        self.pose = [float(parts[i]) for i in range(1, 7)]
+        self.duration = parse_opt_float(parts[7])
+        self.velocity_percent = parse_opt_float(parts[8])
+        self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
+
+        self.log_debug("Parsed MovePose: %s, accel=%s%%", self.pose, self.accel_percent)
+        self.is_valid = True
+        return (True, None)
+
+    def _get_target_rad(self, state: ControllerState) -> np.ndarray:
+        """Solve IK for target pose and return joint positions in radians."""
+        current_rad = np.asarray(
+            steps_to_rad(state.Position_in), dtype=np.float64
+        )
+
+        assert self.pose is not None
+        target_pose = se3_from_rpy(
+            self.pose[0] / 1000.0,
+            self.pose[1] / 1000.0,
+            self.pose[2] / 1000.0,
+            self.pose[3],
+            self.pose[4],
+            self.pose[5],
+            degrees=True,
+        )
+
+        ik_solution = solve_ik(PAROL6_ROBOT.robot, target_pose, current_rad)
+        if not ik_solution.success:
+            error_str = "Target pose is unreachable."
+            if ik_solution.violations:
+                error_str += f" Reason: {ik_solution.violations}"
+            raise IKError(error_str)
+
+        return np.asarray(ik_solution.q, dtype=np.float64)

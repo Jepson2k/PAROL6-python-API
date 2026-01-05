@@ -4,12 +4,16 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 
 import numpy as np
 import sophuspy as sp
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.config import steps_to_rad
 from parol6.utils.se3_utils import se3_from_matrix
 from parol6.protocol.wire import CommandCode
 
@@ -40,6 +44,13 @@ class ControllerState:
     disabled_reason: str = ""
     e_stop_active: bool = False
     stream_mode: bool = False
+
+    # Motion profile (TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR)
+    motion_profile: str = "TOPPRA"
+
+    # Streaming executors for online motion (jogging/streaming)
+    streaming_executor: "StreamingExecutor | None" = None  # Joint-space Ruckig
+    cartesian_streaming_executor: "CartesianStreamingExecutor | None" = None  # Cartesian Ruckig
 
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
@@ -159,6 +170,7 @@ class ControllerState:
         self.disabled_reason = ""
         self.e_stop_active = False
         self.stream_mode = False
+        self.motion_profile = "TOPPRA"
 
         # Tool back to none
         self._current_tool = "NONE"
@@ -270,7 +282,23 @@ class StateManager:
             self._state = ControllerState()
             self._state_lock = threading.RLock()  # Use RLock for re-entrant locking
             self._initialized = True
+            self._init_streaming_executor()
             logger.info("StateManager initialized with NumPy buffers")
+
+    def _init_streaming_executor(self) -> None:
+        """Initialize the streaming executors for jogging/streaming."""
+        from parol6.config import CONTROL_RATE_HZ
+        from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
+
+        if self._state is not None:
+            dt = 1.0 / CONTROL_RATE_HZ
+            self._state.streaming_executor = StreamingExecutor(
+                num_dofs=6,
+                dt=dt,
+            )
+            self._state.cartesian_streaming_executor = CartesianStreamingExecutor(
+                dt=dt,
+            )
 
     def get_state(self) -> ControllerState:
         """
@@ -297,6 +325,7 @@ class StateManager:
         """
         with self._state_lock:
             self._state = ControllerState()
+            self._init_streaming_executor()
             logger.info("Controller state reset")
 
 
@@ -355,7 +384,7 @@ def ensure_fkine_updated(state: ControllerState) -> None:
 
     if pos_changed or tool_changed or state._fkine_se3 is None:
         # Recompute fkine
-        q = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
+        q = steps_to_rad(state.Position_in)
         assert PAROL6_ROBOT.robot is not None
         T_raw = cast(Any, PAROL6_ROBOT.robot).fkine(q)
 

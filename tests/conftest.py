@@ -461,18 +461,6 @@ def client(ports: TestPorts):
     )
 
 
-@pytest.fixture(autouse=True)
-def clean_state(client):
-    """
-    Reset controller state before each test for fast isolation.
-
-    Uses RESET command to instantly reset positions, queues, tool, errors.
-    """
-    client.reset()
-    client.home(wait=True)
-    return client
-
-
 def pytest_sessionfinish(session, exitstatus):
     """Called after whole test run finished."""
     logger.info(

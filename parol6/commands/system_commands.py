@@ -292,3 +292,59 @@ class SimulatorCommand(SystemCommand):
             f"Simulator {'ON' if self.mode_on else 'OFF'}",
             details={"simulator_mode": "on" if self.mode_on else "off"},
         )
+
+
+# Valid motion profile types
+VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "SCURVE", "LINEAR"))
+
+
+@register_command("SETPROFILE")
+class SetProfileCommand(SystemCommand):
+    """
+    Set the system-wide motion profile.
+
+    Format: SETPROFILE|<profile_type>
+
+    Profile Types:
+        TOPPRA    - Time-optimal path parameterization (default)
+        RUCKIG    - Time-optimal jerk-limited (point-to-point only)
+        QUINTIC   - C² smooth polynomial trajectories
+        TRAPEZOID - Linear segments with parabolic blends
+        SCURVE    - S-curve jerk-limited trajectories
+        LINEAR    - Direct interpolation (no smoothing)
+    """
+
+    __slots__ = ("profile",)
+
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+        """Parse SETPROFILE command."""
+        if parts[0].upper() != "SETPROFILE":
+            return False, None
+
+        if len(parts) != 2:
+            return False, "SETPROFILE requires 1 parameter: profile_type"
+
+        profile = parts[1].upper()
+        if profile not in VALID_PROFILES:
+            valid_list = ", ".join(sorted(VALID_PROFILES))
+            return False, f"Invalid profile '{parts[1]}'. Valid profiles: {valid_list}"
+
+        self.profile = profile
+        logger.info(f"Parsed SETPROFILE: profile={self.profile}")
+        return True, None
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatus:
+        """Execute profile change - update system motion profile."""
+        if not hasattr(self, "profile") or self.profile is None:
+            self.fail("Profile not set")
+            return ExecutionStatus.failed("Profile not set")
+
+        old_profile = state.motion_profile
+        state.motion_profile = self.profile
+        logger.info(f"SETPROFILE: Changed motion profile from {old_profile} to {self.profile}")
+
+        self.finish()
+        return ExecutionStatus.completed(
+            f"Motion profile set to {self.profile}",
+            details={"profile": self.profile, "previous": old_profile},
+        )

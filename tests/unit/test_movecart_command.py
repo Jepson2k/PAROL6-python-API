@@ -1,6 +1,5 @@
 """Tests for MoveCartCommand parsing, including acceleration parameter."""
 
-import pytest
 from parol6.commands.cartesian_commands import MoveCartCommand
 from parol6.config import DEFAULT_ACCEL_PERCENT
 
@@ -88,32 +87,3 @@ class TestMoveCartCommandParsing:
         assert cmd.velocity_percent is None
         assert cmd.duration is None
         assert cmd.pose is None  # pose is None until do_match parses a command
-
-
-class TestAccelAffectsDuration:
-    """Test that acceleration parameter affects motion duration."""
-
-    def test_trapezoidal_duration_edge_cases(self):
-        """Helper handles zero/invalid inputs correctly."""
-        td = MoveCartCommand._trapezoidal_duration
-        assert td(0, 1, 1) == 0.0  # Zero distance
-        assert td(1, 0, 1) == 0.0  # Zero velocity
-        assert td(1, 1, 0) == 0.0  # Zero accel
-
-    def test_trapezoidal_duration_formulas(self):
-        """Helper uses correct trapezoid/triangle formulas."""
-        import math
-
-        td = MoveCartCommand._trapezoidal_duration
-        # Long move: t = d/v + v/a = 10 + 1 = 11s
-        assert abs(td(1.0, 0.1, 0.1) - 11.0) < 0.001
-        # Short move: t = 2*sqrt(d/a) ≈ 1.414s
-        assert abs(td(0.05, 0.1, 0.1) - 2 * math.sqrt(0.5)) < 0.001
-
-    def test_higher_accel_gives_shorter_duration(self):
-        """Higher acceleration percentage results in shorter motion duration."""
-        td = MoveCartCommand._trapezoidal_duration
-        low_accel_dur = td(0.1, 0.1, 0.05)  # Low accel
-        high_accel_dur = td(0.1, 0.1, 0.3)  # High accel
-        assert high_accel_dur < low_accel_dur
-        assert low_accel_dur / high_accel_dur > 1.5  # Meaningful difference

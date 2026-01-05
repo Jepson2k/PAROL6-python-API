@@ -7,7 +7,7 @@ Implements command objects that interface with the existing robot API.
 
 import numpy as np
 
-from parol6.PAROL6_ROBOT import cart
+from parol6.config import LIMITS
 
 from .coordinates import WorkCoordinateSystem
 from .parser import GcodeToken
@@ -124,10 +124,9 @@ class G1Command(GcodeCommand):
         )
 
         # Convert feed rate (mm/min) to speed percentage
-        # Import robot speed limits from configuration
-        # Values are in m/s, convert to mm/min
-        max_speed_mm_min = cart.vel.linear.max * 1000 * 60  # m/s to mm/min
-        min_speed_mm_min = cart.vel.linear.min * 1000 * 60  # m/s to mm/min
+        # LIMITS uses SI (m/s), convert to mm/min
+        max_speed_mm_min = LIMITS.cart.hard.velocity.linear * 1000 * 60  # m/s to mm/min
+        min_speed_mm_min = max_speed_mm_min * 0.01  # 1% of max
 
         # Map feed rate to percentage (0-100)
         speed_percentage = np.interp(
@@ -194,15 +193,11 @@ class G2Command(GcodeCommand):
             self.is_valid = False
             self.error_message = "Invalid arc: start and end radii don't match"
 
-        # Convert positions to machine coordinates
-        self.machine_start = coord_system.work_to_machine(self.start_position)
-        self.machine_end = coord_system.work_to_machine(target_position)
-        self.machine_center = coord_system.work_to_machine(self.center)
-
-        # Convert to robot coordinates
-        self.robot_start = coord_system.gcode_to_robot_coords(self.machine_start)
-        self.robot_end = coord_system.gcode_to_robot_coords(self.machine_end)
-        self.robot_center = coord_system.gcode_to_robot_coords(self.machine_center)
+        # Convert end and center positions to machine then robot coordinates
+        machine_end = coord_system.work_to_machine(target_position)
+        machine_center = coord_system.work_to_machine(self.center)
+        self.robot_end = coord_system.gcode_to_robot_coords(machine_end)
+        self.robot_center = coord_system.gcode_to_robot_coords(machine_center)
 
         # Get feed rate from state
         self.feed_rate = state.feed_rate
@@ -212,9 +207,9 @@ class G2Command(GcodeCommand):
         Convert to SMOOTH_ARC_CENTER command for robot API
 
         G2 uses clockwise arc interpolation with specified feed rate
-        """
-        # Format: SMOOTH_ARC_CENTER|end_x|end_y|end_z|end_rx|end_ry|end_rz|center_x|center_y|center_z|frame|start_x|start_y|start_z|start_rx|start_ry|start_rz|duration|speed|clockwise
 
+        Wire format: SMOOTH_ARC_CENTER|end_x,y,z,rx,ry,rz|center_x,y,z|frame|timing_type|timing_value|[CW]
+        """
         # Extract positions
         end_x, end_y, end_z = self.robot_end[0:3]
         end_rx, end_ry, end_rz = (
@@ -223,31 +218,21 @@ class G2Command(GcodeCommand):
 
         center_x, center_y, center_z = self.robot_center[0:3]
 
-        start_x, start_y, start_z = self.robot_start[0:3]
-        start_rx, start_ry, start_rz = (
-            self.robot_start[3:6] if len(self.robot_start) >= 6 else [0, 0, 0]
-        )
-
-        # Convert feed rate to speed percentage
-        max_speed_mm_min = cart.vel.linear.max * 1000 * 60
-        min_speed_mm_min = cart.vel.linear.min * 1000 * 60
+        # Convert feed rate to speed percentage (m/s to mm/min)
+        max_speed_mm_min = LIMITS.cart.hard.velocity.linear * 1000 * 60
+        min_speed_mm_min = max_speed_mm_min * 0.01
 
         speed_percentage = np.interp(
             self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
         )
         speed_percentage = np.clip(speed_percentage, 0, 100)
 
-        # Build command string
-        end_str = f"{end_x:.3f}|{end_y:.3f}|{end_z:.3f}|{end_rx:.3f}|{end_ry:.3f}|{end_rz:.3f}"
-        center_str = f"{center_x:.3f}|{center_y:.3f}|{center_z:.3f}"
-        start_str = f"{start_x:.3f}|{start_y:.3f}|{start_z:.3f}|{start_rx:.3f}|{start_ry:.3f}|{start_rz:.3f}"
+        # Build command string with comma-separated coordinates
+        end_str = f"{end_x:.3f},{end_y:.3f},{end_z:.3f},{end_rx:.3f},{end_ry:.3f},{end_rz:.3f}"
+        center_str = f"{center_x:.3f},{center_y:.3f},{center_z:.3f}"
 
-        # Use speed-based movement
-        duration = "None"
-        frame = "0"  # World frame
-        clockwise = "True"  # G2 is clockwise
-
-        command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{frame}|{start_str}|{duration}|{speed_percentage:.1f}|{clockwise}"
+        # G2 is clockwise
+        command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|WRF|SPEED|{speed_percentage:.1f}|CW"
         return command
 
 
@@ -304,15 +289,11 @@ class G3Command(GcodeCommand):
             self.is_valid = False
             self.error_message = "Invalid arc: start and end radii don't match"
 
-        # Convert positions to machine coordinates
-        self.machine_start = coord_system.work_to_machine(self.start_position)
-        self.machine_end = coord_system.work_to_machine(target_position)
-        self.machine_center = coord_system.work_to_machine(self.center)
-
-        # Convert to robot coordinates
-        self.robot_start = coord_system.gcode_to_robot_coords(self.machine_start)
-        self.robot_end = coord_system.gcode_to_robot_coords(self.machine_end)
-        self.robot_center = coord_system.gcode_to_robot_coords(self.machine_center)
+        # Convert end and center positions to machine then robot coordinates
+        machine_end = coord_system.work_to_machine(target_position)
+        machine_center = coord_system.work_to_machine(self.center)
+        self.robot_end = coord_system.gcode_to_robot_coords(machine_end)
+        self.robot_center = coord_system.gcode_to_robot_coords(machine_center)
 
         # Get feed rate from state
         self.feed_rate = state.feed_rate
@@ -322,9 +303,10 @@ class G3Command(GcodeCommand):
         Convert to SMOOTH_ARC_CENTER command for robot API
 
         G3 uses counter-clockwise arc interpolation with specified feed rate
-        """
-        # Format: SMOOTH_ARC_CENTER|end_x|end_y|end_z|end_rx|end_ry|end_rz|center_x|center_y|center_z|frame|start_x|start_y|start_z|start_rx|start_ry|start_rz|duration|speed|clockwise
 
+        Wire format: SMOOTH_ARC_CENTER|end_x,y,z,rx,ry,rz|center_x,y,z|frame|timing_type|timing_value
+        (no CW suffix means counter-clockwise)
+        """
         # Extract positions
         end_x, end_y, end_z = self.robot_end[0:3]
         end_rx, end_ry, end_rz = (
@@ -333,31 +315,21 @@ class G3Command(GcodeCommand):
 
         center_x, center_y, center_z = self.robot_center[0:3]
 
-        start_x, start_y, start_z = self.robot_start[0:3]
-        start_rx, start_ry, start_rz = (
-            self.robot_start[3:6] if len(self.robot_start) >= 6 else [0, 0, 0]
-        )
-
-        # Convert feed rate to speed percentage
-        max_speed_mm_min = cart.vel.linear.max * 1000 * 60
-        min_speed_mm_min = cart.vel.linear.min * 1000 * 60
+        # Convert feed rate to speed percentage (m/s to mm/min)
+        max_speed_mm_min = LIMITS.cart.hard.velocity.linear * 1000 * 60
+        min_speed_mm_min = max_speed_mm_min * 0.01
 
         speed_percentage = np.interp(
             self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
         )
         speed_percentage = np.clip(speed_percentage, 0, 100)
 
-        # Build command string
-        end_str = f"{end_x:.3f}|{end_y:.3f}|{end_z:.3f}|{end_rx:.3f}|{end_ry:.3f}|{end_rz:.3f}"
-        center_str = f"{center_x:.3f}|{center_y:.3f}|{center_z:.3f}"
-        start_str = f"{start_x:.3f}|{start_y:.3f}|{start_z:.3f}|{start_rx:.3f}|{start_ry:.3f}|{start_rz:.3f}"
+        # Build command string with comma-separated coordinates
+        end_str = f"{end_x:.3f},{end_y:.3f},{end_z:.3f},{end_rx:.3f},{end_ry:.3f},{end_rz:.3f}"
+        center_str = f"{center_x:.3f},{center_y:.3f},{center_z:.3f}"
 
-        # Use speed-based movement
-        duration = "None"
-        frame = "0"  # World frame
-        clockwise = "False"  # G3 is counter-clockwise
-
-        command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|{frame}|{start_str}|{duration}|{speed_percentage:.1f}|{clockwise}"
+        # G3 is counter-clockwise (no CW suffix)
+        command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|WRF|SPEED|{speed_percentage:.1f}"
         return command
 
 

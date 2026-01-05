@@ -8,6 +8,7 @@ SYSTEM_COMMANDS: set[str] = {
     "SET_PORT",
     "STREAM",
     "SIMULATOR",
+    "SETPROFILE",
 }
 
 QUERY_COMMANDS: set[str] = {
@@ -21,6 +22,7 @@ QUERY_COMMANDS: set[str] = {
     "GET_LOOP_STATS",
     "GET_CURRENT_ACTION",
     "GET_QUEUE",
+    "GETPROFILE",
     "PING",
 }
 

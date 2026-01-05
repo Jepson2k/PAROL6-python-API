@@ -9,7 +9,16 @@ from math import ceil
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import INTERVAL_S
+from parol6.config import (
+    INTERVAL_S,
+    JOG_MIN_STEPS,
+    LIMITS,
+    deg_to_steps,
+    rad_to_steps,
+    speed_steps_to_rad,
+    steps_to_deg,
+    steps_to_rad,
+)
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
@@ -131,6 +140,8 @@ class JogCommand(MotionCommand):
         "speed_out",
         "command_len",
         "target_position",
+        "_speeds_array",
+        "_jog_vel_buf",
     )
 
     def __init__(self):
@@ -223,13 +234,13 @@ class JogCommand(MotionCommand):
         self.direction = 1 if 0 <= self.joint <= 5 else -1
         self.joint_index = self.joint if self.direction == 1 else self.joint - 6
 
-        lims = self.LIMS_STEPS[self.joint_index]
+        lims = LIMITS.joint.position.steps[self.joint_index]
         min_limit, max_limit = lims[0], lims[1]
 
         distance_steps = 0
         if self.distance_deg is not None:
             distance_steps = int(
-                PAROL6_ROBOT.ops.deg_to_steps(abs(self.distance_deg), self.joint_index)
+                deg_to_steps(abs(self.distance_deg), self.joint_index)
             )
             self.target_position = state.Position_in[self.joint_index] + (
                 distance_steps * self.direction
@@ -237,18 +248,18 @@ class JogCommand(MotionCommand):
 
             if not (min_limit <= self.target_position <= max_limit):
                 # Convert to degrees for clearer error message
-                target_deg = PAROL6_ROBOT.ops.steps_to_deg(
+                target_deg = steps_to_deg(
                     self.target_position, self.joint_index
                 )
-                min_deg = PAROL6_ROBOT.ops.steps_to_deg(min_limit, self.joint_index)
-                max_deg = PAROL6_ROBOT.ops.steps_to_deg(max_limit, self.joint_index)
+                min_deg = steps_to_deg(min_limit, self.joint_index)
+                max_deg = steps_to_deg(max_limit, self.joint_index)
                 raise ValueError(
                     f"Target position {target_deg:.2f}° is out of joint limits ({min_deg:.2f}°, {max_deg:.2f}°)."
                 )
 
         # Motion timing calculations
-        jog_min = self.JOG_MIN[self.joint_index]
-        jog_max = self.JOG_MAX[self.joint_index]
+        jog_min = JOG_MIN_STEPS
+        jog_max = int(LIMITS.joint.jog.velocity_steps[self.joint_index])
 
         if self.mode == "distance" and self.duration:
             speed_steps_per_sec = (
@@ -276,6 +287,12 @@ class JogCommand(MotionCommand):
         if self.mode == "time" and self.duration and self.duration > 0:
             self.start_timer(self.duration)
 
+        self._jog_initialized = False  # Track whether motion executor has been synced
+
+        # Pre-allocate buffers for hot path (avoids allocations per tick)
+        self._speeds_array = np.zeros(6, dtype=np.float64)
+        self._jog_vel_buf = [0.0] * 6
+
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """This is the EXECUTION phase. It runs on every loop cycle."""
 
@@ -283,24 +300,72 @@ class JogCommand(MotionCommand):
         if self.joint_index is None or not isinstance(self.joint_index, int):
             raise RuntimeError("Invalid joint index in execute_step")
 
-        stop_reason = None
-        cur = state.Position_in[self.joint_index]
+        # Use StreamingExecutor if available (for smooth jogging)
+        if state.stream_mode and state.streaming_executor is not None:
+            return self._execute_streaming(state)
 
-        if self.mode == "time" and self.timer_expired():
-            stop_reason = "Timed jog finished."
-        elif self.mode == "distance" and (
-            (self.direction == 1 and cur >= self.target_position)
-            or (self.direction == -1 and cur <= self.target_position)
-        ):
-            stop_reason = "Distance jog finished."
+        # Standard velocity-based jogging (non-streaming or no executor)
+        return self._execute_velocity_jog(state)
 
-        if not stop_reason:
-            # Use base class limit_hit_mask helper
-            speeds_array = np.zeros(6)
-            speeds_array[self.joint_index] = self.speed_out
-            limit_mask = self.limit_hit_mask(state.Position_in, speeds_array)
-            if limit_mask[self.joint_index]:
-                stop_reason = f"Limit reached on joint {self.joint_index + 1}."
+    def _execute_streaming(self, state: "ControllerState") -> ExecutionStatus:
+        """Execute using StreamingExecutor for smooth jogging with velocity control."""
+        assert state.streaming_executor is not None
+        assert self.joint_index is not None
+
+        se = state.streaming_executor
+
+        # Sync position on first tick
+        if not self._jog_initialized:
+            current_q_rad = list(
+                np.asarray(steps_to_rad(state.Position_in), dtype=float)
+            )
+            se.sync_position(current_q_rad)
+            self._jog_initialized = True
+
+        # Check stop conditions
+        stop_reason = self._check_stop_conditions(state)
+
+        if stop_reason:
+            # Decelerate to stop using velocity mode (reuse buffer)
+            for i in range(6):
+                self._jog_vel_buf[i] = 0.0
+            se.set_jog_velocity(self._jog_vel_buf)
+            pos_rad, vel, finished = se.tick()
+            steps = rad_to_steps(np.array(pos_rad))
+            self.set_move_position(state, np.asarray(steps))
+
+            # Check if actually stopped (velocity near zero)
+            if finished or all(abs(v) < 0.001 for v in vel):
+                if stop_reason.startswith("Limit"):
+                    logger.warning(stop_reason)
+                else:
+                    self.log_trace(stop_reason)
+                self.is_finished = True
+                return ExecutionStatus.completed(stop_reason)
+            return ExecutionStatus.executing("Jogging (stopping)")
+
+        # Set jog velocity for this joint (reuse buffer)
+        speed_rad = float(
+            speed_steps_to_rad(abs(self.speed_out), self.joint_index)
+        )
+        for i in range(6):
+            self._jog_vel_buf[i] = 0.0
+        self._jog_vel_buf[self.joint_index] = speed_rad * self.direction
+
+        se.set_jog_velocity(self._jog_vel_buf)
+        pos_rad, _vel, _finished = se.tick()
+
+        steps = rad_to_steps(np.array(pos_rad))
+        self.set_move_position(state, np.asarray(steps))
+
+        self.command_step += 1
+        return ExecutionStatus.executing("Jogging")
+
+    def _execute_velocity_jog(self, state: "ControllerState") -> ExecutionStatus:
+        """Execute using standard velocity-based jogging."""
+        assert self.joint_index is not None
+
+        stop_reason = self._check_stop_conditions(state)
 
         if stop_reason:
             if stop_reason.startswith("Limit"):
@@ -317,6 +382,29 @@ class JogCommand(MotionCommand):
         state.Command_out = CommandCode.JOG
         self.command_step += 1
         return ExecutionStatus.executing("Jogging")
+
+    def _check_stop_conditions(self, state: "ControllerState") -> str | None:
+        """Check if jog should stop. Returns stop reason or None."""
+        assert self.joint_index is not None
+
+        cur = state.Position_in[self.joint_index]
+
+        if self.mode == "time" and self.timer_expired():
+            return "Timed jog finished."
+        elif self.mode == "distance" and (
+            (self.direction == 1 and cur >= self.target_position)
+            or (self.direction == -1 and cur <= self.target_position)
+        ):
+            return "Distance jog finished."
+
+        # Check limit hit (reuse pre-allocated buffer)
+        self._speeds_array.fill(0)
+        self._speeds_array[self.joint_index] = self.speed_out
+        limit_mask = self.limit_hit_mask(state.Position_in, self._speeds_array)
+        if limit_mask[self.joint_index]:
+            return f"Limit reached on joint {self.joint_index + 1}."
+
+        return None
 
 
 @register_command("MULTIJOG")
@@ -354,7 +442,7 @@ class MultiJogCommand(MotionCommand):
 
         # Calculated values
         self.speeds_out = np.zeros(6, dtype=np.int32)
-        self._lims_steps = PAROL6_ROBOT.joint.limits.steps
+        self._lims_steps = LIMITS.joint.position.steps
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
         """
@@ -425,12 +513,9 @@ class MultiJogCommand(MotionCommand):
 
         pct = np.clip(np.abs(speeds_pct) / 100.0, 0.0, 1.0)
         for i, idx in enumerate(joint_index):
+            jog_max = float(LIMITS.joint.jog.velocity_steps[idx])
             self.speeds_out[idx] = (
-                int(
-                    self.linmap_pct(
-                        pct[i] * 100.0, self.JOG_MIN[idx], self.JOG_MAX[idx]
-                    )
-                )
+                int(self.linmap_pct(pct[i] * 100.0, JOG_MIN_STEPS, jog_max))
                 * direction[i]
             )
 

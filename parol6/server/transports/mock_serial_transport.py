@@ -16,6 +16,7 @@ import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6 import config as cfg
+from parol6.config import LIMITS
 from parol6.protocol.wire import CommandCode, split_to_3_bytes
 from parol6.server.state import ControllerState
 
@@ -76,8 +77,8 @@ class MockRobotState:
         """Initialize robot to standby position."""
         # Set initial positions to standby position for better IK
         for i in range(6):
-            deg = float(PAROL6_ROBOT.joint.standby.deg[i])
-            steps = int(PAROL6_ROBOT.ops.deg_to_steps(deg, i))
+            deg = float(cfg.STANDBY_ANGLES_DEG[i])
+            steps = int(cfg.deg_to_steps(deg, i))
             self.position_in[i] = steps
         # Initialize float accumulator from integer steps
         self.position_f = self.position_in.astype(np.float64)
@@ -134,10 +135,10 @@ class MockSerialTransport:
         self._reader_thread: threading.Thread | None = None
         self._reader_running = False
 
-        # Precompute motion simulation constants
-        self._vmax_f = PAROL6_ROBOT.joint.speed.max.astype(np.float64, copy=False)
-        self._vmax_i32 = PAROL6_ROBOT.joint.speed.max.astype(np.int32, copy=False)
-        lims = np.asarray(PAROL6_ROBOT.joint.limits.steps, dtype=np.int64)
+        # Precompute motion simulation constants from LIMITS
+        self._vmax_f = LIMITS.joint.hard.velocity_steps.astype(np.float64, copy=False)
+        self._vmax_i32 = LIMITS.joint.hard.velocity_steps.copy()
+        lims = np.asarray(LIMITS.joint.position.steps, dtype=np.int64)
         self._jmin_f = lims[:, 0].astype(np.float64, copy=False)
         self._jmax_f = lims[:, 1].astype(np.float64, copy=False)
 
@@ -291,7 +292,7 @@ class MockSerialTransport:
                 # Mark all 8 homed bits as 1 to satisfy status bitfield expectations
                 state.homed_in.fill(1)
                 for i in range(6):
-                    steps = int(PAROL6_ROBOT.ops.deg_to_steps(float(target_deg[i]), i))
+                    steps = int(cfg.deg_to_steps(float(target_deg[i]), i))
                     state.position_in[i] = steps
                     state.position_f[i] = float(steps)
                     state.speed_in[i] = 0
@@ -348,7 +349,7 @@ class MockSerialTransport:
                 err_f = target - current_f
 
                 # Calculate max move this tick from per-joint max speed
-                max_step_f = float(PAROL6_ROBOT.joint.speed.max[i]) * float(dt)
+                max_step_f = float(LIMITS.joint.hard.velocity_steps[i]) * float(dt)
                 if max_step_f < 1.0:
                     # ensure some progress at very small dt
                     max_step_f = 1.0
@@ -362,7 +363,7 @@ class MockSerialTransport:
                 new_pos_f = current_f + move
 
                 # Apply joint limits
-                jmin, jmax = PAROL6_ROBOT.joint.limits.steps[i]
+                jmin, jmax = LIMITS.joint.position.steps[i]
                 if new_pos_f < float(jmin):
                     new_pos_f = float(jmin)
                 elif new_pos_f > float(jmax):
@@ -377,7 +378,7 @@ class MockSerialTransport:
                 )
             else:
                 realized_v = np.zeros(6, dtype=np.int32)
-            vmax = PAROL6_ROBOT.joint.speed.max.astype(np.int32)
+            vmax = LIMITS.joint.hard.velocity_steps
             state.speed_in[:] = np.clip(realized_v, -vmax, vmax)
 
         else:

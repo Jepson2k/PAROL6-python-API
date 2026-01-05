@@ -77,7 +77,7 @@ class TestErrorConditions:
         # Test with out-of-range speed percentage; client sends fire-and-forget
         result = client.move_cartesian(
             pose=[100, 100, 100, 0, 0, 0],
-            speed_percentage=200,
+            speed=200,
         )
         assert result is True
 

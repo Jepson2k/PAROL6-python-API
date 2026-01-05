@@ -32,7 +32,7 @@ from parol6.server.state import ControllerState, StateManager
 from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.status_cache import get_cache
 from parol6.server.transports import create_and_connect_transport, is_simulation_mode
-from parol6.server.transports.mock_serial_transport import MockSerialTransport
+from parol6.server.transports.mock_serial_adapter import MockSerialProcessAdapter
 from parol6.server.transports.serial_transport import SerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
 import parol6.config as cfg
@@ -56,7 +56,7 @@ class ExecutionContext:
     """Context passed to commands during execution."""
 
     udp_transport: UDPTransport | None
-    serial_transport: SerialTransport | MockSerialTransport | None
+    serial_transport: SerialTransport | MockSerialProcessAdapter | None
     gcode_interpreter: GcodeInterpreter | None
     addr: tuple[str, int] | None
     state: ControllerState
@@ -114,7 +114,7 @@ class Controller:
         # Core components
         self.state_manager = StateManager()
         self.udp_transport: UDPTransport | None = None
-        self.serial_transport: SerialTransport | MockSerialTransport | None = None
+        self.serial_transport: SerialTransport | MockSerialProcessAdapter | None = None
 
         # ACK management
         self.ack_socket: socket.socket | None = None
@@ -818,7 +818,7 @@ class Controller:
                                         "true",
                                         "yes",
                                     ) and isinstance(
-                                        self.serial_transport, MockSerialTransport
+                                        self.serial_transport, MockSerialProcessAdapter
                                     ):
                                         self.serial_transport.sync_from_controller_state(
                                             state
@@ -959,9 +959,9 @@ class Controller:
                             msg = status.message or "Queue error"
                             self.udp_transport.send_response(f"ERROR|{msg}", addr)
 
-                # Start execution if no active command
-                if not self.active_command:
-                    self._execute_active_command()
+                # Note: Don't call _execute_active_command() here. The main
+                # control loop handles command activation to avoid race
+                # conditions with setup() being called from two threads.
             except Exception as e:
                 logger.error(f"Error in command processing: {e}", exc_info=True)
 
@@ -1158,7 +1158,7 @@ class Controller:
 
                     # Sync mock transport after RESET to ensure position consistency
                     if isinstance(ac.command, ResetCommand) and isinstance(
-                        self.serial_transport, MockSerialTransport
+                        self.serial_transport, MockSerialProcessAdapter
                     ):
                         self.serial_transport.sync_from_controller_state(state)
                         # Skip any stale frames that were encoded before sync
@@ -1374,6 +1374,8 @@ class Controller:
 
 def main():
     """Main entry point for the controller."""
+    import signal
+
     # Parse arguments first to get logging level
     parser = argparse.ArgumentParser(description="PAROL6 Robot Controller")
     parser.add_argument("--host", default="0.0.0.0", help="UDP host address")
@@ -1458,6 +1460,18 @@ def main():
     )
 
     # Create and run controller
+    controller = None
+
+    def handle_sigterm(signum, frame):
+        """Handle SIGTERM signal for graceful shutdown."""
+        logger.info("Received SIGTERM, shutting down...")
+        if controller:
+            controller.stop()
+        raise SystemExit(0)
+
+    # Install signal handler for graceful shutdown on SIGTERM
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
     try:
         controller = Controller(config)
 

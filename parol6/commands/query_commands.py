@@ -77,7 +77,7 @@ class GetAnglesCommand(QueryCommand):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Execute immediately and return angle data."""
-        angles_rad = PAROL6_ROBOT.ops.steps_to_rad(state.Position_in)
+        angles_rad = cfg.steps_to_rad(state.Position_in)
         angles_deg = np.rad2deg(angles_rad)
         angles_str = ",".join(map(str, angles_deg))
         self.reply_ascii("ANGLES", angles_str)
@@ -330,3 +330,40 @@ class GetQueueCommand(QueryCommand):
 
         self.finish()
         return ExecutionStatus.completed("Queue info sent")
+
+
+# Valid motion profile types
+VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
+
+
+@register_command("GETPROFILE")
+class GetProfileCommand(QueryCommand):
+    """
+    Query the current system-wide motion profile.
+
+    Format: GETPROFILE
+    Response: PROFILE|<profile_type>
+    """
+
+    __slots__ = ()
+
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+        """Parse GETPROFILE command."""
+        if parts[0].upper() != "GETPROFILE":
+            return False, None
+
+        if len(parts) != 1:
+            return False, "GETPROFILE takes no parameters"
+
+        return True, None
+
+    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+        """Return the current motion profile."""
+        profile = state.motion_profile
+        self.reply_ascii("PROFILE", profile)
+
+        self.finish()
+        return ExecutionStatus.completed(
+            f"Current motion profile: {profile}",
+            details={"profile": profile},
+        )

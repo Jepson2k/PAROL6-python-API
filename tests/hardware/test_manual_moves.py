@@ -110,7 +110,7 @@ class TestHardwareBasicMoves:
 
             # Small positive movement
             result = client.jog_joint(
-                joint_idx, speed_percentage=20, duration=1.0, wait_for_ack=True
+                joint_idx, speed=20, duration=1.0, wait_for_ack=True
             )
 
             assert isinstance(result, dict)
@@ -121,7 +121,7 @@ class TestHardwareBasicMoves:
             # Small negative movement (return) - use joint_idx+6 for reverse direction
             result = client.jog_joint(
                 joint_idx + 6,  # +6 indicates reverse direction
-                speed_percentage=20,
+                speed=20,
                 duration=1.0,
                 wait_for_ack=True,
             )
@@ -152,7 +152,7 @@ class TestHardwareBasicMoves:
             result = client.jog_cartesian(
                 frame="WRF",
                 axis=axis,
-                speed_percentage=20,
+                speed=20,
                 duration=1.0,
                 wait_for_ack=True,
             )
@@ -464,7 +464,7 @@ class TestHardwareSafety:
         print("Testing extreme joint angles (should be rejected or limited)...")
         result = client.move_joints(
             extreme_joints,
-            speed_percentage=5,  # Very slow for safety
+            speed=5,  # Very slow for safety
             wait_for_ack=True,
             timeout=10,
         )
@@ -601,7 +601,7 @@ class TestHardwareLegacySequence:
         print("Moving cartesian to: [7, 250, 150, -100, 0, -90]...")
         result = client.move_cartesian(
             [7, 250, 150, -100, 0, -90],
-            speed_percentage=50,
+            speed=50,
             wait_for_ack=True,
             timeout=15,
         )

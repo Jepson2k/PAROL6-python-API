@@ -8,13 +8,12 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, cast, overload
 
 import numpy as np
 import roboticstoolbox as rp
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.config import INTERVAL_S, TRACE
+from parol6.config import INTERVAL_S, LIMITS, TRACE
 from parol6.protocol.wire import CommandCode
 from parol6.server.state import ControllerState
 from parol6.utils.ik import AXIS_MAP
@@ -102,6 +101,16 @@ def parse_int(token: Any) -> int | None:
 def parse_float(token: Any) -> float | None:
     t = _noneify(token)
     return None if t is None else float(t)
+
+
+@overload
+def parse_opt_float(token: Any, default: float) -> float: ...
+@overload
+def parse_opt_float(token: Any, default: None = None) -> float | None: ...
+def parse_opt_float(token: Any, default: float | None = None) -> float | None:
+    """Parse float, returning default for None/NONE/NULL tokens."""
+    t = _noneify(token)
+    return default if t is None else float(t)
 
 
 def csv_ints(token: Any) -> list[int]:
@@ -427,19 +436,6 @@ class MotionCommand(CommandBase):
 
     streamable: bool = False  # Can be replaced in stream mode (only for jog commands)
 
-    # Limits and kinematic constants
-    LIMS_STEPS: ClassVar[np.ndarray] = PAROL6_ROBOT.joint.limits.steps
-    J_MIN: ClassVar[np.ndarray] = PAROL6_ROBOT.joint.speed.min
-    J_MAX: ClassVar[np.ndarray] = PAROL6_ROBOT.joint.speed.max
-    JOG_MIN: ClassVar[np.ndarray] = PAROL6_ROBOT.joint.speed.jog.min
-    JOG_MAX: ClassVar[np.ndarray] = PAROL6_ROBOT.joint.speed.jog.max
-    ACC_MIN_RAD: ClassVar[float] = PAROL6_ROBOT.joint.acc.min_rad
-    ACC_MAX_RAD: ClassVar[float] = PAROL6_ROBOT.joint.acc.max_rad
-    CART_LIN_JOG_MIN: ClassVar[float] = PAROL6_ROBOT.cart.vel.jog.min
-    CART_LIN_JOG_MAX: ClassVar[float] = PAROL6_ROBOT.cart.vel.jog.max
-    CART_ANG_JOG_MIN: ClassVar[float] = PAROL6_ROBOT.cart.vel.angular.min  # deg/s
-    CART_ANG_JOG_MAX: ClassVar[float] = PAROL6_ROBOT.cart.vel.angular.max  # deg/s
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -452,55 +448,16 @@ class MotionCommand(CommandBase):
             pct = 100.0
         return lo + (hi - lo) * (pct / 100.0)
 
-    # ---- per-joint max speed/acc ----
-    def joint_vmax(self, velocity_percent: float) -> np.ndarray:
-        return self.J_MIN + (self.J_MAX - self.J_MIN) * (
-            max(0.0, min(100.0, velocity_percent)) / 100.0
-        )
-
-    def joint_amax_steps(self, accel_percent: float) -> np.ndarray:
-        a_rad = self.linmap_pct(accel_percent, self.ACC_MIN_RAD, self.ACC_MAX_RAD)
-        return np.asarray(
-            PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float
-        )
-
-    # ---- speed scaling & limits ----
-    def scale_speeds_to_joint_max(self, speeds: np.ndarray) -> np.ndarray:
-        denom = np.where(self.J_MAX != 0.0, self.J_MAX, 1.0)
-        scale = float(np.max(np.abs(speeds) / denom))
-        if scale > 1.0:
-            return np.rint(speeds / scale).astype(np.int32)
-        else:
-            return np.asarray(speeds, dtype=np.int32)
-
     def limit_hit_mask(self, pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
-        return ((speeds > 0) & (pos_steps >= self.LIMS_STEPS[:, 1])) | (
-            (speeds < 0) & (pos_steps <= self.LIMS_STEPS[:, 0])
+        lims = LIMITS.joint.position.steps
+        return ((speeds > 0) & (pos_steps >= lims[:, 1])) | (
+            (speeds < 0) & (pos_steps <= lims[:, 0])
         )
-
-    # ---- trapezoid batch planner for step-space ----
-    @staticmethod
-    def plan_trapezoids(
-        start_steps: np.ndarray, target_steps: np.ndarray, tgrid: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        n = int(tgrid.size)
-        q = np.empty((n, 6), dtype=float)
-        qd = np.empty((n, 6), dtype=float)
-        stationary = target_steps == start_steps
-        if np.any(stationary):
-            q[:, stationary] = start_steps[stationary]
-            qd[:, stationary] = 0.0
-        for i in np.flatnonzero(~stationary):
-            jt = rp.trapezoidal(float(start_steps[i]), float(target_steps[i]), tgrid)
-            q[:, i] = jt.q
-            qd[:, i] = jt.qd
-        return q, qd
 
     def fail_and_idle(self, state: ControllerState, message: str) -> None:
         self.fail(message)
         self.stop_and_idle(state)
 
-    # ---- Higher-level IO helpers for common patterns ----
     def set_move_position(self, state: ControllerState, steps: np.ndarray) -> None:
         """Set position for MOVE command (zero speeds, Command=MOVE)."""
         np.copyto(state.Position_out, steps, casting="no")
@@ -528,95 +485,39 @@ class MotionCommand(CommandBase):
         return status
 
 
-# TODO: need to get and support the other motion profiles from the original program
-class MotionProfile:
+class TrajectoryMoveCommandBase(MotionCommand):
     """
-    Utilities to build motion profiles in step-space using consistent trapezoids.
+    Base class for commands that execute pre-computed trajectories.
+
+    Subclasses pre-compute trajectory_steps in do_setup(), and this base class
+    handles direct tick-by-tick execution. Precomputed trajectories bypass
+    StreamingExecutor since they're already time-optimal (TOPPRA/RUCKIG) or
+    validated (QUINTIC/TRAPEZOID).
+
+    Subclasses may override execute_step() if they need special handling
+    (e.g., streaming mode support).
     """
 
-    @staticmethod
-    def from_duration_steps(
-        start_steps: np.ndarray,
-        target_steps: np.ndarray,
-        duration_s: float,
-        dt: float = INTERVAL_S,
-    ) -> np.ndarray:
-        """
-        Build per-joint trapezoids to reach target in given duration.
-        Returns array of shape (N, 6) steps (int32).
-        """
-        dur = float(max(0.0, duration_s))
-        if dur == 0.0:
-            # Degenerate: single step
-            return np.asarray(target_steps, dtype=np.int32).reshape(1, -1)
-        n = max(2, int(np.ceil(dur / max(1e-9, dt))))
-        tgrid = np.linspace(0.0, dur, n, dtype=float)
-        q, _qd = MotionCommand.plan_trapezoids(
-            np.asarray(start_steps, dtype=float),
-            np.asarray(target_steps, dtype=float),
-            tgrid,
-        )
-        return cast(np.ndarray, q.astype(np.int32, copy=False))
+    __slots__ = ("trajectory_steps", "command_step")
 
-    @staticmethod
-    def from_velocity_percent(
-        start_steps: np.ndarray,
-        target_steps: np.ndarray,
-        velocity_percent: float,
-        accel_percent: float,
-        dt: float = INTERVAL_S,
-    ) -> np.ndarray:
-        """
-        Build per-joint trapezoids sized by per-joint vmax and accel derived from percent settings.
-        """
-        start_steps = np.asarray(start_steps, dtype=float)
-        target_steps = np.asarray(target_steps, dtype=float)
+    def __init__(self):
+        super().__init__()
+        self.trajectory_steps: np.ndarray = np.empty((0, 6), dtype=np.int32)
+        self.command_step = 0
 
-        # Per-joint vmax and amax (steps/s and steps/s^2)
-        jmin = MotionCommand.J_MIN
-        jmax = MotionCommand.J_MAX
-        v_max_joint = jmin + (jmax - jmin) * (
-            max(0.0, min(100.0, velocity_percent)) / 100.0
-        )
+    def execute_step(self, state: ControllerState) -> ExecutionStatus:
+        """Execute pre-computed trajectory directly (no streaming executor)."""
+        if self.command_step >= len(self.trajectory_steps):
+            self.log_info("%s finished.", self.__class__.__name__)
+            self.is_finished = True
+            self.stop_and_idle(state)
+            return ExecutionStatus.completed(f"{self.__class__.__name__} complete")
 
-        # Compute accel steps without instantiating MotionCommand
-        a_rad = MotionCommand.linmap_pct(
-            accel_percent, MotionCommand.ACC_MIN_RAD, MotionCommand.ACC_MAX_RAD
-        )
-        a_steps_vec = np.asarray(
-            PAROL6_ROBOT.ops.speed_rad_to_steps(np.full(6, a_rad)), dtype=float
-        )
+        # Output trajectory step directly
+        self.set_move_position(state, self.trajectory_steps[self.command_step])
+        self.command_step += 1
 
-        if np.any(v_max_joint <= 0) or np.any(a_steps_vec <= 0):
-            raise ValueError("Invalid speed/acceleration (must be positive).")
-
-        path = np.abs(target_steps - start_steps)
-        t_accel = v_max_joint / a_steps_vec  # time to reach vmax per joint
-        short_path = path < (v_max_joint * t_accel)
-
-        # Safe accel time for short paths
-        t_accel_adj = t_accel.copy()
-        mask = short_path
-        t_accel_adj[mask] = 0.0
-        mask_safe = mask & (a_steps_vec > 0)
-        t_accel_adj[mask_safe] = np.sqrt(path[mask_safe] / a_steps_vec[mask_safe])
-
-        # Per-joint total time, then horizon
-        joint_time = np.where(
-            short_path, 2.0 * t_accel_adj, path / v_max_joint + t_accel
-        )
-        total_time = float(np.max(joint_time))
-        if total_time <= 0.0:
-            return cast(
-                np.ndarray, np.asarray(start_steps, dtype=np.int32).reshape(1, -1)
-            )
-        if total_time < (2 * dt):
-            total_time = 2 * dt
-
-        n = max(2, int(np.ceil(total_time / max(dt, 1e-9))))
-        tgrid = np.linspace(0.0, total_time, n, dtype=float)
-        q, _qd = MotionCommand.plan_trapezoids(start_steps, target_steps, tgrid)
-        return cast(np.ndarray, q.astype(np.int32, copy=False))
+        return ExecutionStatus.executing(self.__class__.__name__)
 
 
 class SystemCommand(CommandBase):
