@@ -35,6 +35,7 @@ dependencies = [
 
     "pyserial",
     "spatialmath-python",
+    "spatialgeometry>=1.0.3",  # Pin to avoid source-only 1.0.1 fallback during pip resolution
     "scipy==1.11.4",
     "ruckig>=0.9.0",
     "toppra>=0.6.0",

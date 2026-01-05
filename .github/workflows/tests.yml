@@ -10,7 +10,7 @@ on:
 
 jobs:
   lint:
-    name: Lint (ruff + mypy)
+    name: Lint (pre-commit)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,18 +19,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install dev dependencies
+      - name: Install dependencies for mypy
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      - name: Ruff (lint)
-        run: ruff check parol6
-      - name: Ruff (format check)
-        run: ruff format --check parol6
-      - name: MyPy
-        run: mypy parol6
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
