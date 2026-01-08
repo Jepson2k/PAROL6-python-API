@@ -294,16 +294,17 @@ class SimulatorCommand(SystemCommand):
         )
 
 
-# Valid motion profile types
-VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "SCURVE", "LINEAR"))
+# Valid motion profile types for joint and Cartesian moves
+VALID_JOINT_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "SCURVE", "LINEAR"))
+VALID_CARTESIAN_PROFILES = frozenset(("TOPPRA", "LINEAR"))
 
 
-@register_command("SETPROFILE")
-class SetProfileCommand(SystemCommand):
+@register_command("SETJOINTPROFILE")
+class SetJointProfileCommand(SystemCommand):
     """
-    Set the system-wide motion profile.
+    Set the motion profile for joint-space moves (MoveJoint, MovePose, JogJoint).
 
-    Format: SETPROFILE|<profile_type>
+    Format: SETJOINTPROFILE|<profile_type>
 
     Profile Types:
         TOPPRA    - Time-optimal path parameterization (default)
@@ -317,34 +318,85 @@ class SetProfileCommand(SystemCommand):
     __slots__ = ("profile",)
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse SETPROFILE command."""
-        if parts[0].upper() != "SETPROFILE":
+        """Parse SETJOINTPROFILE command."""
+        if parts[0].upper() != "SETJOINTPROFILE":
             return False, None
 
         if len(parts) != 2:
-            return False, "SETPROFILE requires 1 parameter: profile_type"
+            return False, "SETJOINTPROFILE requires 1 parameter: profile_type"
 
         profile = parts[1].upper()
-        if profile not in VALID_PROFILES:
-            valid_list = ", ".join(sorted(VALID_PROFILES))
-            return False, f"Invalid profile '{parts[1]}'. Valid profiles: {valid_list}"
+        if profile not in VALID_JOINT_PROFILES:
+            valid_list = ", ".join(sorted(VALID_JOINT_PROFILES))
+            return False, f"Invalid joint profile '{parts[1]}'. Valid profiles: {valid_list}"
 
         self.profile = profile
-        logger.info(f"Parsed SETPROFILE: profile={self.profile}")
+        logger.info(f"Parsed SETJOINTPROFILE: profile={self.profile}")
         return True, None
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
-        """Execute profile change - update system motion profile."""
+        """Execute profile change - update joint motion profile."""
         if not hasattr(self, "profile") or self.profile is None:
             self.fail("Profile not set")
             return ExecutionStatus.failed("Profile not set")
 
-        old_profile = state.motion_profile
-        state.motion_profile = self.profile
-        logger.info(f"SETPROFILE: Changed motion profile from {old_profile} to {self.profile}")
+        old_profile = state.joint_motion_profile
+        state.joint_motion_profile = self.profile
+        logger.info(f"SETJOINTPROFILE: Changed joint motion profile from {old_profile} to {self.profile}")
 
         self.finish()
         return ExecutionStatus.completed(
-            f"Motion profile set to {self.profile}",
+            f"Joint motion profile set to {self.profile}",
+            details={"profile": self.profile, "previous": old_profile},
+        )
+
+
+@register_command("SETCARTPROFILE")
+class SetCartProfileCommand(SystemCommand):
+    """
+    Set the motion profile for Cartesian moves (MoveCart, Circle, Arc, Spline, JogCart).
+
+    Format: SETCARTPROFILE|<profile_type>
+
+    Profile Types:
+        TOPPRA    - Time-optimal path parameterization (default)
+        LINEAR    - Direct interpolation (no smoothing)
+
+    Note: RUCKIG, QUINTIC, TRAPEZOID, and SCURVE are not supported for Cartesian moves
+    because they cannot properly follow Cartesian paths through joint space.
+    """
+
+    __slots__ = ("profile",)
+
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+        """Parse SETCARTPROFILE command."""
+        if parts[0].upper() != "SETCARTPROFILE":
+            return False, None
+
+        if len(parts) != 2:
+            return False, "SETCARTPROFILE requires 1 parameter: profile_type"
+
+        profile = parts[1].upper()
+        if profile not in VALID_CARTESIAN_PROFILES:
+            valid_list = ", ".join(sorted(VALID_CARTESIAN_PROFILES))
+            return False, f"Invalid Cartesian profile '{parts[1]}'. Valid profiles: {valid_list}"
+
+        self.profile = profile
+        logger.info(f"Parsed SETCARTPROFILE: profile={self.profile}")
+        return True, None
+
+    def execute_step(self, state: ControllerState) -> ExecutionStatus:
+        """Execute profile change - update Cartesian motion profile."""
+        if not hasattr(self, "profile") or self.profile is None:
+            self.fail("Profile not set")
+            return ExecutionStatus.failed("Profile not set")
+
+        old_profile = state.cartesian_motion_profile
+        state.cartesian_motion_profile = self.profile
+        logger.info(f"SETCARTPROFILE: Changed Cartesian motion profile from {old_profile} to {self.profile}")
+
+        self.finish()
+        return ExecutionStatus.completed(
+            f"Cartesian motion profile set to {self.profile}",
             details={"profile": self.profile, "previous": old_profile},
         )

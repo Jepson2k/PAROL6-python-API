@@ -260,7 +260,7 @@ class AsyncRobotClient:
     async def _send(self, message: str) -> bool:
         """
         Send a command based on AckPolicy:
-        - System commands: wait for server OK/ERROR, return True on OK
+        - System commands: wait for server OK/ERROR, return True on OK, False on ERROR
         - Motion commands: wait iff policy requires ACK; otherwise fire-and-forget (return True on send)
         - Query commands: should use _request path; if invoked here, just fire-and-forget
         """
@@ -271,12 +271,19 @@ class AsyncRobotClient:
 
         # System commands: wait for OK/ERROR
         if name in SYSTEM_COMMANDS:
-            return await self._request_ok(message, self.timeout)
+            try:
+                return await self._request_ok(message, self.timeout)
+            except RuntimeError:
+                # Server rejected command (sent ERROR|...)
+                return False
 
         # Motion and other non-query commands
         if name not in QUERY_COMMANDS:
             if self._ack_policy.requires_ack(message):
-                return await self._request_ok(message, self.timeout)
+                try:
+                    return await self._request_ok(message, self.timeout)
+                except RuntimeError:
+                    return False
             # Fire-and-forget
             self._transport.sendto(message.encode("ascii"))
             return True
@@ -309,7 +316,7 @@ class AsyncRobotClient:
     async def _request_ok(self, message: str, timeout: float) -> bool:
         """
         Send a command and wait for a simple 'OK' or 'ERROR|...' reply.
-        Returns True on OK; raises on ERROR or timeout.
+        Returns True on OK; raises RuntimeError on ERROR, TimeoutError on timeout.
         """
         await self._ensure_endpoint()
         assert self._transport is not None
@@ -327,10 +334,8 @@ class AsyncRobotClient:
                         return True
                     if text.startswith("ERROR|"):
                         raise RuntimeError(text)
-                    # Ignore unrelated datagrams
+                    # Ignore unrelated datagrams (like status broadcasts)
                 except (asyncio.TimeoutError, TimeoutError):
-                    break
-                except Exception:
                     break
         raise TimeoutError("Timeout waiting for OK")
 
@@ -562,30 +567,56 @@ class AsyncRobotClient:
         """
         return await self._send(f"SET_TOOL|{tool_name.upper()}")
 
-    async def set_profile(self, profile: str) -> bool:
+    async def set_joint_profile(self, profile: str) -> bool:
         """
-        Set the system-wide motion profile.
+        Set the motion profile for joint-space moves (MoveJoint, MovePose, JogJoint).
 
         Args:
-            profile: Motion profile type ('RUCKIG', 'QUINTIC', 'TRAPEZOID', 'NONE')
+            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'SCURVE', 'LINEAR')
 
         Returns:
             True if successful
         """
-        return await self._send(f"SETPROFILE|{profile.upper()}")
+        return await self._send(f"SETJOINTPROFILE|{profile.upper()}")
 
-    async def get_profile(self) -> str | None:
+    async def get_joint_profile(self) -> str | None:
         """
-        Get the current system-wide motion profile.
+        Get the current joint motion profile.
 
         Returns:
-            Current motion profile ('RUCKIG', 'QUINTIC', 'TRAPEZOID', 'NONE'),
-            or None on timeout.
+            Current joint motion profile, or None on timeout.
         """
-        resp = await self._request("GETPROFILE", bufsize=256)
+        resp = await self._request("GETJOINTPROFILE", bufsize=256)
         if not resp:
             return None
-        # Response format: "PROFILE|<profile>" or similar
+        parts = resp.split("|")
+        if len(parts) >= 2:
+            return parts[1].upper()
+        return resp.strip().upper()
+
+    async def set_cartesian_profile(self, profile: str) -> bool:
+        """
+        Set the motion profile for Cartesian moves (MoveCart, Circle, Arc, Spline, JogCart).
+
+        Args:
+            profile: Motion profile type ('TOPPRA', 'LINEAR')
+                Note: RUCKIG, QUINTIC, TRAPEZOID, and SCURVE are not supported for Cartesian moves.
+
+        Returns:
+            True if successful
+        """
+        return await self._send(f"SETCARTPROFILE|{profile.upper()}")
+
+    async def get_cartesian_profile(self) -> str | None:
+        """
+        Get the current Cartesian motion profile.
+
+        Returns:
+            Current Cartesian motion profile, or None on timeout.
+        """
+        resp = await self._request("GETCARTPROFILE", bufsize=256)
+        if not resp:
+            return None
         parts = resp.split("|")
         if len(parts) >= 2:
             return parts[1].upper()
@@ -1233,7 +1264,7 @@ class AsyncRobotClient:
     ) -> bool:
         """Execute a smooth circular motion.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             center: [x, y, z] center point in mm
@@ -1289,7 +1320,7 @@ class AsyncRobotClient:
     ) -> bool:
         """Execute a smooth arc motion defined by center point.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
@@ -1341,7 +1372,7 @@ class AsyncRobotClient:
     ) -> bool:
         """Execute a smooth arc motion defined parametrically (radius and angle).
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
@@ -1390,7 +1421,7 @@ class AsyncRobotClient:
     ) -> bool:
         """Execute a smooth spline motion through waypoints.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             waypoints: List of [x, y, z, rx, ry, rz] poses (mm and degrees)

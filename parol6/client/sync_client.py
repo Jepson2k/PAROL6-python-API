@@ -302,27 +302,48 @@ class RobotClient:
         """
         return _run(self._inner.set_tool(tool_name))
 
-    def set_profile(self, profile: str) -> bool:
+    def set_joint_profile(self, profile: str) -> bool:
         """
-        Set the system-wide motion profile.
+        Set the motion profile for joint-space moves (MoveJoint, MovePose, JogJoint).
 
         Args:
-            profile: Motion profile type ('RUCKIG', 'QUINTIC', 'TRAPEZOID', 'NONE')
+            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'SCURVE', 'LINEAR')
 
         Returns:
             True if successful
         """
-        return _run(self._inner.set_profile(profile))
+        return _run(self._inner.set_joint_profile(profile))
 
-    def get_profile(self) -> str | None:
+    def get_joint_profile(self) -> str | None:
         """
-        Get the current system-wide motion profile.
+        Get the current joint motion profile.
 
         Returns:
-            Current motion profile ('RUCKIG', 'QUINTIC', 'TRAPEZOID', 'NONE'),
-            or None on timeout.
+            Current joint motion profile, or None on timeout.
         """
-        return _run(self._inner.get_profile())
+        return _run(self._inner.get_joint_profile())
+
+    def set_cartesian_profile(self, profile: str) -> bool:
+        """
+        Set the motion profile for Cartesian moves (MoveCart, Circle, Arc, Spline, JogCart).
+
+        Args:
+            profile: Motion profile type ('TOPPRA', 'LINEAR')
+                Note: RUCKIG, QUINTIC, TRAPEZOID, and SCURVE are not supported for Cartesian moves.
+
+        Returns:
+            True if successful
+        """
+        return _run(self._inner.set_cartesian_profile(profile))
+
+    def get_cartesian_profile(self) -> str | None:
+        """
+        Get the current Cartesian motion profile.
+
+        Returns:
+            Current Cartesian motion profile, or None on timeout.
+        """
+        return _run(self._inner.get_cartesian_profile())
 
     def get_current_action(self) -> dict | None:
         """
@@ -792,7 +813,7 @@ class RobotClient:
     ) -> bool:
         """Execute a smooth circular motion.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             center: Circle center [x, y, z] in mm.
@@ -839,7 +860,7 @@ class RobotClient:
     ) -> bool:
         """Execute a smooth arc motion defined by center point.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
@@ -881,7 +902,7 @@ class RobotClient:
     ) -> bool:
         """Execute a smooth arc motion defined parametrically.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
@@ -922,7 +943,7 @@ class RobotClient:
     ) -> bool:
         """Execute a smooth spline motion through waypoints.
 
-        Uses system motion profile (set via set_profile()).
+        Uses Cartesian motion profile (set via set_cartesian_profile()).
 
         Args:
             waypoints: List of poses [x, y, z, rx, ry, rz] in mm and degrees.

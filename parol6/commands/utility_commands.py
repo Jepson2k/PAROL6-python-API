@@ -5,7 +5,7 @@ Contains utility commands like Delay
 
 import logging
 
-from parol6.commands.base import CommandBase, ExecutionStatus, parse_float
+from parol6.commands.base import CommandBase, ExecutionStatus, SystemCommand, parse_float
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState
@@ -100,7 +100,7 @@ class DelayCommand(CommandBase):
 
 
 @register_command("RESET")
-class ResetCommand(CommandBase):
+class ResetCommand(SystemCommand):
     """
     Instantly reset controller state to initial values.
 
@@ -113,19 +113,10 @@ class ResetCommand(CommandBase):
         """Parse RESET command (no parameters)."""
         if len(parts) != 1:
             return (False, "RESET takes no parameters")
-        self.is_valid = True
         return (True, None)
 
-    def setup(self, state: "ControllerState") -> None:
+    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Reset state immediately."""
         state.reset()
         logger.debug("RESET command executed")
-        self.is_finished = True
-
-    def tick(self, state: "ControllerState") -> ExecutionStatus:
-        """Already finished in setup."""
-        return ExecutionStatus.completed("Reset complete")
-
-    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Already finished in setup."""
         return ExecutionStatus.completed("Reset complete")

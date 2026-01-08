@@ -62,7 +62,7 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
         )
         target_rad = self._get_target_rad(state)
 
-        profile = state.motion_profile
+        profile = state.joint_motion_profile
         accel_pct = float(self.accel_percent) if self.accel_percent else DEFAULT_ACCEL_PERCENT
 
         joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)

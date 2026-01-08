@@ -332,38 +332,67 @@ class GetQueueCommand(QueryCommand):
         return ExecutionStatus.completed("Queue info sent")
 
 
-# Valid motion profile types
-VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
-
-
-@register_command("GETPROFILE")
-class GetProfileCommand(QueryCommand):
+@register_command("GETJOINTPROFILE")
+class GetJointProfileCommand(QueryCommand):
     """
-    Query the current system-wide motion profile.
+    Query the current joint motion profile.
 
-    Format: GETPROFILE
-    Response: PROFILE|<profile_type>
+    Format: GETJOINTPROFILE
+    Response: JOINTPROFILE|<profile_type>
     """
 
     __slots__ = ()
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse GETPROFILE command."""
-        if parts[0].upper() != "GETPROFILE":
+        """Parse GETJOINTPROFILE command."""
+        if parts[0].upper() != "GETJOINTPROFILE":
             return False, None
 
         if len(parts) != 1:
-            return False, "GETPROFILE takes no parameters"
+            return False, "GETJOINTPROFILE takes no parameters"
 
         return True, None
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Return the current motion profile."""
-        profile = state.motion_profile
-        self.reply_ascii("PROFILE", profile)
+        """Return the current joint motion profile."""
+        profile = state.joint_motion_profile
+        self.reply_ascii("JOINTPROFILE", profile)
 
         self.finish()
         return ExecutionStatus.completed(
-            f"Current motion profile: {profile}",
+            f"Current joint motion profile: {profile}",
+            details={"profile": profile},
+        )
+
+
+@register_command("GETCARTPROFILE")
+class GetCartProfileCommand(QueryCommand):
+    """
+    Query the current Cartesian motion profile.
+
+    Format: GETCARTPROFILE
+    Response: CARTPROFILE|<profile_type>
+    """
+
+    __slots__ = ()
+
+    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+        """Parse GETCARTPROFILE command."""
+        if parts[0].upper() != "GETCARTPROFILE":
+            return False, None
+
+        if len(parts) != 1:
+            return False, "GETCARTPROFILE takes no parameters"
+
+        return True, None
+
+    def execute_step(self, state: "ControllerState") -> ExecutionStatus:
+        """Return the current Cartesian motion profile."""
+        profile = state.cartesian_motion_profile
+        self.reply_ascii("CARTPROFILE", profile)
+
+        self.finish()
+        return ExecutionStatus.completed(
+            f"Current Cartesian motion profile: {profile}",
             details={"profile": profile},
         )

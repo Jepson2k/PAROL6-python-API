@@ -503,7 +503,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
         """Pre-compute trajectory from current position."""
         self.log_debug("  -> Preparing %s...", self.description)
 
-        self._system_profile = state.motion_profile.lower()
+        self._system_profile = state.cartesian_motion_profile.lower()
         current_pose = self.get_current_pose(state)
         self.log_info(
             "  -> Generating %s from position: %s",

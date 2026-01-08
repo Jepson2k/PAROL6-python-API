@@ -96,14 +96,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
             steps_to_rad(state.Position_in), dtype=np.float64
         )
 
-        profile_str = state.motion_profile
-
-        # RUCKIG is point-to-point and cannot follow Cartesian paths
-        if profile_str.upper() == "RUCKIG":
-            raise ValueError(
-                "RUCKIG profile cannot be used for Cartesian moves. "
-                "Use QUINTIC, LINEAR, or TOPPRA instead."
-            )
+        profile_str = state.cartesian_motion_profile
         vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
         acc_pct = self.accel_percent if self.accel_percent is not None else 100.0
 
