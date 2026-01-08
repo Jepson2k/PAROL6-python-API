@@ -451,16 +451,45 @@ class TrajectoryBuilder:
             return self._build_simple_trajectory()
 
     def _build_simple_trajectory(self) -> Trajectory:
-        """Fallback: simple linear interpolation when TOPP-RA fails."""
-        if self.duration is not None and self.duration > 0:
-            duration = self.duration
+        """
+        Build trajectory with simple linear interpolation.
+
+        Iteratively extends duration if joint velocity/acceleration limits
+        are violated, using the same approach as QUINTIC/TRAPEZOID/SCURVE.
+        """
+        user_duration = self.duration if self.duration and self.duration > 0 else None
+        if user_duration:
+            duration = user_duration
         else:
             duration = self._estimate_simple_duration()
-        n_output = max(2, int(np.ceil(duration / self.dt)))
 
-        # Vectorized path sampling
-        s_values = np.linspace(0.0, 1.0, n_output)
-        trajectory_rad = self.joint_path.sample_many(s_values)
+        max_iterations = 10
+        for iteration in range(max_iterations):
+            n_output = max(2, int(np.ceil(duration / self.dt)))
+
+            # Vectorized path sampling
+            s_values = np.linspace(0.0, 1.0, n_output)
+            trajectory_rad = self.joint_path.sample_many(s_values)
+
+            # Check if joint limits are satisfied
+            slowdown = self._compute_slowdown_factor(trajectory_rad, duration)
+            if slowdown <= 1.0:
+                break
+
+            # Extend duration and retry
+            new_duration = duration * slowdown * 1.05  # 5% margin
+            if user_duration:
+                logger.warning(
+                    "LINEAR: Extending duration from %.3fs to %.3fs to respect joint limits",
+                    user_duration,
+                    new_duration,
+                )
+            duration = new_duration
+        else:
+            raise ValueError(
+                f"LINEAR: Could not satisfy joint limits after {max_iterations} iterations. "
+                f"Path may be too aggressive for current joint limits."
+            )
 
         # Convert to motor steps (vectorized)
         steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))

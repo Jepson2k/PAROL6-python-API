@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from parol6.config import INTERVAL_S
+from parol6.config import INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import JointPath, ProfileType, Trajectory, TrajectoryBuilder
 
 
@@ -169,6 +169,82 @@ class TestTrajectoryBuilder:
 
         assert len(trajectory) == 1
         assert trajectory.duration == 0.0
+
+    @pytest.mark.parametrize("profile", [
+        ProfileType.LINEAR,
+        ProfileType.QUINTIC,
+        ProfileType.TRAPEZOID,
+        ProfileType.SCURVE,
+        ProfileType.TOPPRA,
+        ProfileType.RUCKIG,
+    ])
+    def test_trajectory_respects_joint_velocity_limits(self, simple_joint_path, profile):
+        """All profiles should produce trajectories within joint velocity limits."""
+        builder = TrajectoryBuilder(
+            joint_path=simple_joint_path,
+            profile=profile,
+            dt=INTERVAL_S,
+        )
+        traj = builder.build()
+
+        if len(traj) < 2:
+            return  # Can't check velocity on single-point trajectory
+
+        # Convert steps back to radians for limit checking
+        trajectory_rad = steps_to_rad(traj.steps)
+
+        # Compute velocities via finite difference
+        dt = traj.duration / (len(traj) - 1)
+        velocities_rad = np.diff(trajectory_rad, axis=0) / dt
+
+        # Check against velocity limits (with small tolerance for numerical error)
+        v_max_rad = LIMITS.joint.hard.velocity
+        max_vel_ratio = float(np.max(np.abs(velocities_rad) / v_max_rad))
+
+        assert max_vel_ratio <= 1.05, (
+            f"Profile {profile.name}: velocity exceeded limits by "
+            f"{(max_vel_ratio - 1) * 100:.1f}%"
+        )
+
+    @pytest.mark.parametrize("profile", [
+        ProfileType.LINEAR,
+        ProfileType.QUINTIC,
+        ProfileType.TRAPEZOID,
+        ProfileType.SCURVE,
+    ])
+    def test_short_duration_enforces_limits(self, profile):
+        """Profiles should extend duration when user-specified duration would violate limits."""
+        # Create a path with large displacement
+        start = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        end = np.array([1.5, -1.0, 1.5, 1.0, 1.0, 1.0])  # ~86 deg moves
+        path = JointPath.interpolate(start, end, n_samples=50)
+
+        # Request impossibly short duration (0.1s for ~86 deg moves)
+        builder = TrajectoryBuilder(
+            joint_path=path,
+            profile=profile,
+            duration=0.1,  # Too short - should be extended
+            dt=INTERVAL_S,
+        )
+        traj = builder.build()
+
+        # Duration should have been extended beyond requested 0.1s
+        assert traj.duration > 0.1, (
+            f"Profile {profile.name}: duration not extended (got {traj.duration:.3f}s)"
+        )
+
+        # And resulting trajectory should still respect limits
+        if len(traj) >= 2:
+            trajectory_rad = steps_to_rad(traj.steps)
+            dt = traj.duration / (len(traj) - 1)
+            velocities_rad = np.diff(trajectory_rad, axis=0) / dt
+            v_max_rad = LIMITS.joint.hard.velocity
+            max_vel_ratio = float(np.max(np.abs(velocities_rad) / v_max_rad))
+
+            assert max_vel_ratio <= 1.05, (
+                f"Profile {profile.name}: velocity exceeded limits by "
+                f"{(max_vel_ratio - 1) * 100:.1f}%"
+            )
 
 
 class TestTrajectory:
