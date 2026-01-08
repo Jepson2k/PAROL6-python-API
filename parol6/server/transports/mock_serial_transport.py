@@ -360,16 +360,16 @@ class MockSerialTransport:
                 elif move < -max_step_f:
                     move = -max_step_f
 
-                new_pos_f = current_f + move
+                pos_f: float = current_f + move
 
                 # Apply joint limits
                 jmin, jmax = LIMITS.joint.position.steps[i]
-                if new_pos_f < float(jmin):
-                    new_pos_f = float(jmin)
-                elif new_pos_f > float(jmax):
-                    new_pos_f = float(jmax)
+                if pos_f < jmin:
+                    pos_f = float(jmin)
+                elif pos_f > jmax:
+                    pos_f = float(jmax)
 
-                state.position_f[i] = new_pos_f
+                state.position_f[i] = pos_f
 
             # Report actual velocity based on realized motion
             if dt > 0:

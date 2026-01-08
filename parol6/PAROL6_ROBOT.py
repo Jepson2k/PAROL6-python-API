@@ -240,7 +240,7 @@ def _compute_jacobian_velocity_bound() -> tuple[float, float]:
 
     # Angular velocity: estimate from wrist joint speeds
     # (less critical, use simple estimate)
-    angular_vel = np.mean(_joint_speed_rad[3:6])
+    angular_vel = float(np.mean(_joint_speed_rad[3:6]))
 
     return median_vel, angular_vel
 
@@ -274,7 +274,7 @@ def _compute_jacobian_accel_bound() -> tuple[float, float]:
         linear_acc = float(np.median(accelerations))
 
     # Angular acceleration: estimate from wrist joint accelerations
-    angular_acc = np.mean(_joint_acc_rad[3:6])
+    angular_acc = float(np.mean(_joint_acc_rad[3:6]))
 
     return linear_acc, angular_acc
 
@@ -308,7 +308,7 @@ def _compute_jacobian_jerk_bound() -> tuple[float, float]:
         linear_jerk = float(np.median(jerks))
 
     # Angular jerk: estimate from wrist joint jerks
-    angular_jerk = np.mean(_joint_jerk_rad[3:6])
+    angular_jerk = float(np.mean(_joint_jerk_rad[3:6]))
 
     return linear_jerk, angular_jerk
 
