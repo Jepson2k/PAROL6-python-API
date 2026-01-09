@@ -8,7 +8,6 @@ in a separate process, communicating with the main process via shared memory.
 import logging
 import math
 import time
-from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 
 import numpy as np
@@ -17,7 +16,6 @@ import sophuspy as sp
 from parol6.server.ipc import (
     IKInputLayout,
     attach_shm,
-    get_ik_resp_seq,
     pack_ik_response,
     unpack_ik_request,
 )
@@ -45,13 +43,21 @@ def ik_enablement_worker_main(
     # Attach to shared memory
     input_shm = attach_shm(input_shm_name)
     output_shm = attach_shm(output_shm_name)
+    assert input_shm.buf is not None
+    assert output_shm.buf is not None
     input_mv = memoryview(input_shm.buf)
     output_mv = memoryview(output_shm.buf)
 
     # Initialize robot model in this process
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
     from parol6.utils.ik import AXIS_MAP, solve_ik
-    from parol6.utils.se3_utils import se3_from_matrix, se3_from_trans, se3_rx, se3_ry, se3_rz
+    from parol6.utils.se3_utils import (
+        se3_from_matrix,
+        se3_from_trans,
+        se3_rx,
+        se3_ry,
+        se3_rz,
+    )
 
     robot = PAROL6_ROBOT.robot
     assert robot is not None
@@ -65,8 +71,10 @@ def ik_enablement_worker_main(
         while not shutdown_event.is_set():
             # Read request sequence number (cheap check)
             req_seq = np.frombuffer(
-                input_mv[IKInputLayout.REQ_SEQ_OFFSET:IKInputLayout.REQ_SEQ_OFFSET + 8],
-                dtype=np.uint64
+                input_mv[
+                    IKInputLayout.REQ_SEQ_OFFSET : IKInputLayout.REQ_SEQ_OFFSET + 8
+                ],
+                dtype=np.uint64,
             )[0]
 
             if req_seq != last_req_seq and req_seq > 0:
@@ -79,12 +87,28 @@ def ik_enablement_worker_main(
                 # Compute enablement
                 joint_en = _compute_joint_enable(q_rad, qlim)
                 cart_en_wrf = _compute_cart_enable(
-                    T, "WRF", q_rad, robot, solve_ik, AXIS_MAP,
-                    se3_from_trans, se3_rx, se3_ry, se3_rz
+                    T,
+                    "WRF",
+                    q_rad,
+                    robot,
+                    solve_ik,
+                    AXIS_MAP,
+                    se3_from_trans,
+                    se3_rx,
+                    se3_ry,
+                    se3_rz,
                 )
                 cart_en_trf = _compute_cart_enable(
-                    T, "TRF", q_rad, robot, solve_ik, AXIS_MAP,
-                    se3_from_trans, se3_rx, se3_ry, se3_rz
+                    T,
+                    "TRF",
+                    q_rad,
+                    robot,
+                    solve_ik,
+                    AXIS_MAP,
+                    se3_from_trans,
+                    se3_rx,
+                    se3_ry,
+                    se3_rz,
                 )
 
                 # Write results

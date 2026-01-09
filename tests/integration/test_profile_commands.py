@@ -9,8 +9,6 @@ import time
 
 import pytest
 
-from parol6 import RobotClient
-
 
 @pytest.mark.integration
 class TestJointProfileCommands:
@@ -71,7 +69,9 @@ class TestCartesianProfileCommands:
 
             # Profile should remain unchanged (TOPPRA from previous test or default)
             current = client.get_cartesian_profile()
-            assert current in ("TOPPRA", "LINEAR"), f"Profile changed to {current} unexpectedly"
+            assert current in ("TOPPRA", "LINEAR"), (
+                f"Profile changed to {current} unexpectedly"
+            )
 
     def test_set_cartesian_profile_case_insensitive(self, client, server_proc):
         """Test that Cartesian profile names are case-insensitive."""
@@ -214,8 +214,12 @@ class TestCartesianPrecision:
 
         # Print diagnostic info
         print(f"\nProfile {profile}:")
-        print(f"  Target:   X={final_target[0]:.2f}, Y={final_target[1]:.2f}, Z={final_target[2]:.2f}")
-        print(f"            RX={final_target[3]:.2f}, RY={final_target[4]:.2f}, RZ={final_target[5]:.2f}")
+        print(
+            f"  Target:   X={final_target[0]:.2f}, Y={final_target[1]:.2f}, Z={final_target[2]:.2f}"
+        )
+        print(
+            f"            RX={final_target[3]:.2f}, RY={final_target[4]:.2f}, RZ={final_target[5]:.2f}"
+        )
         print(f"  Actual:   X={pose[0]:.2f}, Y={pose[1]:.2f}, Z={pose[2]:.2f}")
         print(f"            RX={pose[3]:.2f}, RY={pose[4]:.2f}, RZ={pose[5]:.2f}")
 

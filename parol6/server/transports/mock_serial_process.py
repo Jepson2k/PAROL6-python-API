@@ -8,14 +8,11 @@ communicating with the main controller via shared memory.
 import logging
 import time
 from dataclasses import dataclass, field
-from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Event
 
 import numpy as np
 
 from parol6.server.ipc import (
-    MockSerialRxLayout,
-    MockSerialTxLayout,
     attach_shm,
     pack_rx_frame,
     unpack_tx_command,
@@ -37,17 +34,11 @@ class MockRobotState:
         default_factory=lambda: np.zeros((6,), dtype=np.float64)
     )
     # Joint speeds (in steps/sec)
-    speed_in: np.ndarray = field(
-        default_factory=lambda: np.zeros((6,), dtype=np.int32)
-    )
+    speed_in: np.ndarray = field(default_factory=lambda: np.zeros((6,), dtype=np.int32))
     # Homed status per joint
-    homed_in: np.ndarray = field(
-        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
-    )
+    homed_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
     # I/O states
-    io_in: np.ndarray = field(
-        default_factory=lambda: np.zeros((8,), dtype=np.uint8)
-    )
+    io_in: np.ndarray = field(default_factory=lambda: np.zeros((8,), dtype=np.uint8))
     # Error states
     temperature_error_in: np.ndarray = field(
         default_factory=lambda: np.zeros((8,), dtype=np.uint8)
@@ -114,6 +105,8 @@ def mock_serial_worker_main(
     # Attach to shared memory
     rx_shm = attach_shm(rx_shm_name)
     tx_shm = attach_shm(tx_shm_name)
+    assert rx_shm.buf is not None
+    assert tx_shm.buf is not None
     rx_mv = memoryview(rx_shm.buf)
     tx_mv = memoryview(tx_shm.buf)
 
@@ -184,7 +177,9 @@ def mock_serial_worker_main(
                             # Homing complete
                             state.homed_in.fill(1)
                             for i in range(6):
-                                steps = int(float(home_angles_deg[i]) * deg_to_steps_ratios[i])
+                                steps = int(
+                                    float(home_angles_deg[i]) * deg_to_steps_ratios[i]
+                                )
                                 state.position_in[i] = steps
                                 state.position_f[i] = float(steps)
                                 state.speed_in[i] = 0
@@ -247,7 +242,9 @@ def mock_serial_worker_main(
                             state.position_f[i] = new_pos
 
                         if dt > 0:
-                            realized = np.rint((state.position_f - prev_pos) / dt).astype(np.int32)
+                            realized = np.rint(
+                                (state.position_f - prev_pos) / dt
+                            ).astype(np.int32)
                         else:
                             realized = np.zeros(6, dtype=np.int32)
                         np.clip(realized, -vmax_i32, vmax_i32, out=state.speed_in)

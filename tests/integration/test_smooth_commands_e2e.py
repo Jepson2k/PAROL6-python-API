@@ -102,5 +102,6 @@ class TestSmoothMotionMinimal:
         assert client.wait_motion_complete(timeout=10.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
+
 if __name__ == "__main__":
     pytest.main([__file__])

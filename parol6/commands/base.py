@@ -8,10 +8,9 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, ClassVar, cast, overload
+from typing import Any, ClassVar, overload
 
 import numpy as np
-import roboticstoolbox as rp
 
 from parol6.config import INTERVAL_S, LIMITS, TRACE
 from parol6.protocol.wire import CommandCode

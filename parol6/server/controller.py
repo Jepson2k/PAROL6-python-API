@@ -604,7 +604,9 @@ class Controller:
                     )
                 except Exception:
                     _n = "UNKNOWN"
-                logger.log(TRACE, "cmd_received name=%s from=%s cmd_str=%s", _n, addr, cmd_str)
+                logger.log(
+                    TRACE, "cmd_received name=%s from=%s cmd_str=%s", _n, addr, cmd_str
+                )
                 state = self.state_manager.get_state()
 
                 # Track command reception for frequency metrics
@@ -846,8 +848,12 @@ class Controller:
                                     wait_start = time.perf_counter()
                                     wait_timeout = 0.5
                                     frame_received = False
-                                    while time.perf_counter() - wait_start < wait_timeout:
-                                        mv, ver, ts = self.serial_transport.get_latest_frame_view()
+                                    while (
+                                        time.perf_counter() - wait_start < wait_timeout
+                                    ):
+                                        mv, ver, ts = (
+                                            self.serial_transport.get_latest_frame_view()
+                                        )
                                         if mv is not None and ver > 0:
                                             frame_received = True
                                             self.first_frame_received = True
@@ -942,7 +948,9 @@ class Controller:
                             self.command_queue.remove(queued_cmd)
                             removed += 1
                     if removed:
-                        logger.log(TRACE, "queued_streamables_removed count=%d", removed)
+                        logger.log(
+                            TRACE, "queued_streamables_removed count=%d", removed
+                        )
 
                 # Queue the command
                 status = self._queue_command(addr, command, None)

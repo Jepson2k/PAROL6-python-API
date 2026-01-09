@@ -28,15 +28,18 @@ from parol6.config import (
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
-from parol6.utils.errors import IKError
 from parol6.utils.ik import AXIS_MAP, solve_ik
 from parol6.utils.se3_utils import (
-    se3_from_matrix,
     se3_from_rpy,
     se3_interp,
 )
 
-from .base import ExecutionStatus, MotionCommand, TrajectoryMoveCommandBase, parse_opt_float
+from .base import (
+    ExecutionStatus,
+    MotionCommand,
+    TrajectoryMoveCommandBase,
+    parse_opt_float,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +95,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
         """Pre-compute joint trajectory that follows straight-line Cartesian path."""
         assert self.initial_pose is not None and self.target_pose is not None
 
-        current_rad = np.asarray(
-            steps_to_rad(state.Position_in), dtype=np.float64
-        )
+        current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
 
         profile_str = state.cartesian_motion_profile
         vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
@@ -152,7 +153,9 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
                 if not cse.active:
                     cse.sync_pose(self.initial_pose)
                 vel_pct = (
-                    self.velocity_percent if self.velocity_percent is not None else 100.0
+                    self.velocity_percent
+                    if self.velocity_percent is not None
+                    else 100.0
                 )
                 acc_pct = (
                     self.accel_percent if self.accel_percent is not None else 100.0
@@ -277,7 +280,9 @@ class CartesianJogCommand(MotionCommand):
     def do_setup(self, state: "ControllerState") -> None:
         """Set the end time when the command actually starts."""
         self.start_timer(float(self.duration))
-        self._jog_initialized = False  # Track whether cartesian executor has been synced
+        self._jog_initialized = (
+            False  # Track whether cartesian executor has been synced
+        )
         self._ik_stopping = False  # Track graceful stop on IK failure
 
         # Parse axis index and sign from axis_vectors
@@ -398,8 +403,13 @@ class CartesianJogCommand(MotionCommand):
         if not ik_result.success or ik_result.q is None:
             if not self._ik_stopping:
                 now = time.monotonic()
-                if now - CartesianJogCommand._last_ik_warn_time > CartesianJogCommand._IK_WARN_INTERVAL:
-                    logger.warning(f"[CARTJOG] IK failed - initiating graceful stop: pos={target_pose.translation()}")
+                if (
+                    now - CartesianJogCommand._last_ik_warn_time
+                    > CartesianJogCommand._IK_WARN_INTERVAL
+                ):
+                    logger.warning(
+                        f"[CARTJOG] IK failed - initiating graceful stop: pos={target_pose.translation()}"
+                    )
                     CartesianJogCommand._last_ik_warn_time = now
                 cse.stop()
                 self._ik_stopping = True
@@ -419,7 +429,9 @@ class CartesianJogCommand(MotionCommand):
             self._ik_stopping = False
             # Re-apply the jog velocity to resume motion
             if self.frame == "WRF":
-                cse.set_jog_velocity_1dof_wrf(self._axis_index, velocity, self.is_rotation)
+                cse.set_jog_velocity_1dof_wrf(
+                    self._axis_index, velocity, self.is_rotation
+                )
             else:
                 cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
 
@@ -461,7 +473,9 @@ class MoveCartCommand(CartesianMoveCommandBase):
             return (False, "MOVECART requires either duration or velocity_percent")
 
         if self.duration is not None and self.velocity_percent is not None:
-            logger.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
+            logger.info(
+                "  -> INFO: Both duration and velocity_percent provided. Using duration."
+            )
             self.velocity_percent = None
 
         self.log_debug("Parsed MoveCart: %s, accel=%s%%", self.pose, self.accel_percent)
@@ -472,8 +486,13 @@ class MoveCartCommand(CartesianMoveCommandBase):
         """Compute absolute target pose from parsed coordinates."""
         pose = cast(list[float], self.pose)
         self.target_pose = se3_from_rpy(
-            pose[0] / 1000.0, pose[1] / 1000.0, pose[2] / 1000.0,
-            pose[3], pose[4], pose[5], degrees=True,
+            pose[0] / 1000.0,
+            pose[1] / 1000.0,
+            pose[2] / 1000.0,
+            pose[3],
+            pose[4],
+            pose[5],
+            degrees=True,
         )
 
 
@@ -506,13 +525,22 @@ class MoveCartRelTrfCommand(CartesianMoveCommandBase):
         self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
 
         if self.duration is None and self.velocity_percent is None:
-            return (False, "MOVECARTRELTRF requires either duration or velocity_percent")
+            return (
+                False,
+                "MOVECARTRELTRF requires either duration or velocity_percent",
+            )
 
         if self.duration is not None and self.velocity_percent is not None:
-            logger.info("  -> INFO: Both duration and velocity_percent provided. Using duration.")
+            logger.info(
+                "  -> INFO: Both duration and velocity_percent provided. Using duration."
+            )
             self.velocity_percent = None
 
-        self.log_debug("Parsed MoveCartRelTrf: deltas=%s, accel=%s%%", self.deltas, self.accel_percent)
+        self.log_debug(
+            "Parsed MoveCartRelTrf: deltas=%s, accel=%s%%",
+            self.deltas,
+            self.accel_percent,
+        )
         self.is_valid = True
         return (True, None)
 
@@ -520,8 +548,13 @@ class MoveCartRelTrfCommand(CartesianMoveCommandBase):
         """Compute target pose from current pose + TRF delta."""
         deltas = cast(list[float], self.deltas)
         delta_se3 = se3_from_rpy(
-            deltas[0] / 1000.0, deltas[1] / 1000.0, deltas[2] / 1000.0,
-            deltas[3], deltas[4], deltas[5], degrees=True,
+            deltas[0] / 1000.0,
+            deltas[1] / 1000.0,
+            deltas[2] / 1000.0,
+            deltas[3],
+            deltas[4],
+            deltas[5],
+            degrees=True,
         )
         # Post-multiply for tool-relative motion
         self.target_pose = cast(sp.SE3, self.initial_pose) * delta_se3

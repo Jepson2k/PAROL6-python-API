@@ -7,7 +7,6 @@ import time
 import numpy as np
 import pytest
 
-from parol6.config import steps_to_rad, LIMITS
 from parol6.server.ik_worker_client import IKWorkerClient
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
@@ -30,6 +29,7 @@ def test_ik_worker_detects_joint_limits():
 
         # Start from home position and move J1 near its max limit
         from parol6.config import HOME_ANGLES_DEG
+
         qlim = PAROL6_ROBOT.robot.qlim
 
         q = np.deg2rad(HOME_ANGLES_DEG)
@@ -52,8 +52,12 @@ def test_ik_worker_detects_joint_limits():
         joint_en, _, _ = result
 
         # J1 near max: J1+ should be disabled, J1- should be enabled
-        assert joint_en[0] == 0, f"J1+ should be disabled near max limit, got {joint_en[0]}"
-        assert joint_en[1] == 1, f"J1- should be enabled near max limit, got {joint_en[1]}"
+        assert joint_en[0] == 0, (
+            f"J1+ should be disabled near max limit, got {joint_en[0]}"
+        )
+        assert joint_en[1] == 1, (
+            f"J1- should be enabled near max limit, got {joint_en[1]}"
+        )
 
         # Now test J1 near min limit
         q[0] = qlim[0, 0] + 0.001  # J1 very near min limit
@@ -74,8 +78,12 @@ def test_ik_worker_detects_joint_limits():
         joint_en, _, _ = result
 
         # J1 near min: J1+ should be enabled, J1- should be disabled
-        assert joint_en[0] == 1, f"J1+ should be enabled near min limit, got {joint_en[0]}"
-        assert joint_en[1] == 0, f"J1- should be disabled near min limit, got {joint_en[1]}"
+        assert joint_en[0] == 1, (
+            f"J1+ should be enabled near min limit, got {joint_en[0]}"
+        )
+        assert joint_en[1] == 0, (
+            f"J1- should be disabled near min limit, got {joint_en[1]}"
+        )
 
     finally:
         client.stop()
@@ -95,6 +103,7 @@ def test_ik_worker_all_enabled_in_safe_position():
 
         # Use home position - a known safe position
         from parol6.config import HOME_ANGLES_DEG
+
         q_home = np.deg2rad(HOME_ANGLES_DEG)
 
         T = PAROL6_ROBOT.robot.fkine(q_home)
@@ -113,7 +122,9 @@ def test_ik_worker_all_enabled_in_safe_position():
         joint_en, cart_en_wrf, cart_en_trf = result
 
         # All joint directions should be enabled in true center position
-        assert np.all(joint_en == 1), f"All joints should be enabled at center, got {joint_en}"
+        assert np.all(joint_en == 1), (
+            f"All joints should be enabled at center, got {joint_en}"
+        )
 
     finally:
         client.stop()

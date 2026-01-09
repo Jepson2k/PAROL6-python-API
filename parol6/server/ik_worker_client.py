@@ -8,7 +8,6 @@ the main process to submit requests and poll for results asynchronously.
 import atexit
 import logging
 import multiprocessing
-import time
 from multiprocessing import Process
 from multiprocessing.synchronize import Event
 
@@ -203,7 +202,11 @@ class IKWorkerClient:
         Returns:
             Tuple of (joint_en, cart_en_wrf, cart_en_trf)
         """
-        return (self._joint_en.copy(), self._cart_en_wrf.copy(), self._cart_en_trf.copy())
+        return (
+            self._joint_en.copy(),
+            self._cart_en_wrf.copy(),
+            self._cart_en_trf.copy(),
+        )
 
     def has_pending_request(self) -> bool:
         """Check if there's a pending request awaiting response."""

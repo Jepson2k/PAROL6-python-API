@@ -269,7 +269,9 @@ class StreamingExecutor(RuckigExecutorBase):
         cart_vel_per_scale = np.linalg.norm(J_lin @ dq)
 
         if cart_vel_per_scale > 1e-6:
-            v_max_m_s = self._cart_vel_limit / 1000.0 if self._cart_vel_limit else 0.0  # mm/s to m/s
+            v_max_m_s = (
+                self._cart_vel_limit / 1000.0 if self._cart_vel_limit else 0.0
+            )  # mm/s to m/s
             max_scale = v_max_m_s / cart_vel_per_scale
 
             v_max_limited = []
@@ -533,7 +535,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         """
         with self._lock:
             if self.reference_pose is None:
-                logger.warning("set_jog_velocity_1dof_wrf called without reference_pose")
+                logger.warning(
+                    "set_jog_velocity_1dof_wrf called without reference_pose"
+                )
                 return
 
             # Reuse pre-allocated buffer for world velocity

@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6 import config as cfg
 from parol6.config import LIMITS
 from parol6.protocol.wire import CommandCode, split_to_3_bytes

@@ -62,8 +62,6 @@ class ProfileType(Enum):
             return cls.TOPPRA
 
 
-
-
 @dataclass
 class JointPath:
     """
@@ -302,7 +300,9 @@ class TrajectoryBuilder:
         self.profile = (
             ProfileType.from_string(profile) if isinstance(profile, str) else profile
         )
-        self.velocity_percent = velocity_percent if velocity_percent is not None else 100.0
+        self.velocity_percent = (
+            velocity_percent if velocity_percent is not None else 100.0
+        )
         self.accel_percent = accel_percent if accel_percent is not None else 100.0
         self.jerk_percent = jerk_percent if jerk_percent is not None else 100.0
         self.duration = duration
@@ -701,7 +701,8 @@ class TrajectoryBuilder:
             if user_duration:
                 logger.warning(
                     "QUINTIC: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration, new_duration
+                    user_duration,
+                    new_duration,
                 )
             duration = new_duration
         else:
@@ -754,7 +755,9 @@ class TrajectoryBuilder:
                 vmax=2.0 / duration,
                 amax=4.0 / (duration * duration),
             )
-            traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(params)
+            traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(
+                params
+            )
 
             # Scale times to fit our desired duration
             time_scale = profile_duration / duration if duration > 0 else 1.0
@@ -778,7 +781,8 @@ class TrajectoryBuilder:
             if user_duration:
                 logger.warning(
                     "TRAPEZOID: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration, new_duration
+                    user_duration,
+                    new_duration,
                 )
             duration = new_duration
         else:
@@ -854,7 +858,8 @@ class TrajectoryBuilder:
             if user_duration:
                 logger.warning(
                     "SCURVE: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration, new_duration
+                    user_duration,
+                    new_duration,
                 )
             duration = new_duration
         else:

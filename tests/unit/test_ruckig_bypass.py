@@ -20,10 +20,9 @@ class MockState:
     def __init__(self):
         # Start position: actual home position from config
         from parol6.config import HOME_ANGLES_DEG
+
         home_rad = np.deg2rad(HOME_ANGLES_DEG)
-        self.Position_in = np.array(
-            rad_to_steps(home_rad), dtype=np.int32
-        )
+        self.Position_in = np.array(rad_to_steps(home_rad), dtype=np.int32)
         self.Position_out = np.zeros(6, dtype=np.int32)
         self.Speed_out = np.zeros(6, dtype=np.int32)
         self.Command_out = 0
@@ -187,7 +186,9 @@ class TestRuckigExecution:
         error_deg = np.rad2deg(np.abs(final_rad - end_rad))
         max_error = np.max(error_deg)
 
-        assert max_error < 0.1, f"RUCKIG should reach target within 0.1 deg, got {max_error:.3f} deg"
+        assert max_error < 0.1, (
+            f"RUCKIG should reach target within 0.1 deg, got {max_error:.3f} deg"
+        )
 
     def test_ruckig_joint_move_command_setup(self):
         """MoveJointCommand with RUCKIG profile sets up trajectory."""
@@ -239,8 +240,9 @@ class TestQuinticGeometry:
         max_error = np.max(error_deg)
 
         # Allow some error from step quantization
-        assert max_error < 2.0, \
+        assert max_error < 2.0, (
             f"QUINTIC midpoint should be near path midpoint, error={max_error:.2f} deg"
+        )
 
 
 if __name__ == "__main__":

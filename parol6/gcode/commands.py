@@ -329,7 +329,9 @@ class G3Command(GcodeCommand):
         center_str = f"{center_x:.3f},{center_y:.3f},{center_z:.3f}"
 
         # G3 is counter-clockwise (no CW suffix)
-        command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|WRF|SPEED|{speed_percentage:.1f}"
+        command = (
+            f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|WRF|SPEED|{speed_percentage:.1f}"
+        )
         return command
 
 

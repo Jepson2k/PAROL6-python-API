@@ -691,7 +691,11 @@ class RobotClient:
         Returns:
             True if command sent successfully.
         """
-        return _run(self._inner.control_pneumatic_gripper(action, port, wait=wait, **wait_kwargs))
+        return _run(
+            self._inner.control_pneumatic_gripper(
+                action, port, wait=wait, **wait_kwargs
+            )
+        )
 
     def control_electric_gripper(
         self,
@@ -716,7 +720,9 @@ class RobotClient:
             True if command sent successfully.
         """
         return _run(
-            self._inner.control_electric_gripper(action, position, speed, current, wait=wait, **wait_kwargs)
+            self._inner.control_electric_gripper(
+                action, position, speed, current, wait=wait, **wait_kwargs
+            )
         )
 
     # ---------- GCODE ----------

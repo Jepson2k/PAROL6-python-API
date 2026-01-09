@@ -109,6 +109,8 @@ class MockSerialProcessAdapter:
 
             self._rx_shm = create_shm(rx_name, MOCK_RX_SHM_SIZE)
             self._tx_shm = create_shm(tx_name, MOCK_TX_SHM_SIZE)
+            assert self._rx_shm.buf is not None
+            assert self._tx_shm.buf is not None
             self._rx_mv = memoryview(self._rx_shm.buf)
             self._tx_mv = memoryview(self._tx_shm.buf)
 
@@ -131,9 +133,9 @@ class MockSerialProcessAdapter:
             velocity_limits = LIMITS.joint.hard.velocity_steps.copy()
 
             # Calculate deg_to_steps ratios per joint
-            deg_to_steps_ratios = np.array([
-                cfg.deg_to_steps(1.0, i) for i in range(6)
-            ], dtype=np.float64)
+            deg_to_steps_ratios = np.array(
+                [cfg.deg_to_steps(1.0, i) for i in range(6)], dtype=np.float64
+            )
 
             # Spawn subprocess
             self._process = Process(
@@ -161,7 +163,9 @@ class MockSerialProcessAdapter:
                 return False
 
             self._connected = True
-            logger.info(f"MockSerialProcessAdapter connected, subprocess PID: {self._process.pid}")
+            logger.info(
+                f"MockSerialProcessAdapter connected, subprocess PID: {self._process.pid}"
+            )
 
             # Register cleanup on exit
             atexit.register(self._cleanup)
@@ -201,7 +205,9 @@ class MockSerialProcessAdapter:
         if self._process and self._process.is_alive():
             self._process.join(timeout=2.0)
             if self._process.is_alive():
-                logger.warning("MockSerial subprocess did not exit cleanly, terminating")
+                logger.warning(
+                    "MockSerial subprocess did not exit cleanly, terminating"
+                )
                 self._process.terminate()
                 self._process.join(timeout=1.0)
 
@@ -302,7 +308,9 @@ class MockSerialProcessAdapter:
 
         # Return memoryview to payload portion
         layout = MockSerialRxLayout
-        payload_mv = self._rx_mv[layout.PAYLOAD_OFFSET:layout.PAYLOAD_OFFSET + layout.PAYLOAD_SIZE]
+        payload_mv = self._rx_mv[
+            layout.PAYLOAD_OFFSET : layout.PAYLOAD_OFFSET + layout.PAYLOAD_SIZE
+        ]
         return (payload_mv, version, timestamp)
 
     def start_reader(self, shutdown_event) -> None:

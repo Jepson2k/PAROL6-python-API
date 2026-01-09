@@ -159,6 +159,7 @@ def get_com_port_with_fallback() -> str:
 
     return ""
 
+
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from numpy.typing import ArrayLike
 from typing import Union
@@ -194,7 +195,9 @@ def deg_to_steps(deg: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.
     return np.rint(steps_f).astype(np.int32, copy=False)
 
 
-def steps_to_deg(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def steps_to_deg(
+    steps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Convert steps to degrees (gear ratio aware)."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
         return np.float64((float(steps) * _degree_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
@@ -212,7 +215,9 @@ def rad_to_steps(rad: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.
     return deg_to_steps(deg_arr, idx)
 
 
-def steps_to_rad(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def steps_to_rad(
+    steps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Convert steps to radians."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
         return np.float64((float(steps) * _radian_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
@@ -220,7 +225,9 @@ def steps_to_rad(steps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray
     return np.deg2rad(deg_arr)
 
 
-def speed_steps_to_deg(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def speed_steps_to_deg(
+    sps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Convert speed: steps/s to deg/s."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
         return np.float64((float(sps) * _degree_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
@@ -229,7 +236,9 @@ def speed_steps_to_deg(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDA
     return (sps_arr * _degree_per_step) / ratio
 
 
-def speed_deg_to_steps(dps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+def speed_deg_to_steps(
+    dps: ArrayLike, idx: IndexArg = None
+) -> np.int32 | NDArray[np.int32]:
     """Convert speed: deg/s to steps/s."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(dps):
         return np.int32((float(dps) / _degree_per_step) * _joint_ratio[idx])  # type: ignore[arg-type]
@@ -238,7 +247,9 @@ def speed_deg_to_steps(dps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArr
     return stepsps.astype(np.int32, copy=False)
 
 
-def speed_steps_to_rad(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDArray[np.float64]:
+def speed_steps_to_rad(
+    sps: ArrayLike, idx: IndexArg = None
+) -> np.float64 | NDArray[np.float64]:
     """Convert speed: steps/s to rad/s."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
         return np.float64((float(sps) * _radian_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
@@ -247,7 +258,9 @@ def speed_steps_to_rad(sps: ArrayLike, idx: IndexArg = None) -> np.float64 | NDA
     return (sps_arr * _radian_per_step) / ratio
 
 
-def speed_rad_to_steps(rps: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
+def speed_rad_to_steps(
+    rps: ArrayLike, idx: IndexArg = None
+) -> np.int32 | NDArray[np.int32]:
     """Convert speed: rad/s to steps/s."""
     if isinstance(idx, (int, np.integer)) and np.isscalar(rps):
         return np.int32((float(rps) / _radian_per_step) * _joint_ratio[idx])  # type: ignore[arg-type]
@@ -276,42 +289,47 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class Kinodynamic:
     """Joint kinodynamic limits (velocity, acceleration, jerk)."""
+
     # SI units for algorithms
-    velocity: NDArray[np.float64]       # rad/s
-    acceleration: NDArray[np.float64]   # rad/s²
-    jerk: NDArray[np.float64]           # rad/s³
+    velocity: NDArray[np.float64]  # rad/s
+    acceleration: NDArray[np.float64]  # rad/s²
+    jerk: NDArray[np.float64]  # rad/s³
     # Step units for hardware/simulation
-    velocity_steps: NDArray[np.int32]       # steps/s
-    acceleration_steps: NDArray[np.int32]   # steps/s²
-    jerk_steps: NDArray[np.int32]           # steps/s³
+    velocity_steps: NDArray[np.int32]  # steps/s
+    acceleration_steps: NDArray[np.int32]  # steps/s²
+    jerk_steps: NDArray[np.int32]  # steps/s³
 
 
 @dataclass(frozen=True, slots=True)
 class JointPosition:
     """Joint position limits in various units."""
-    deg: NDArray[np.float64]   # [6, 2] - [min, max] per joint
-    rad: NDArray[np.float64]   # [6, 2]
-    steps: NDArray[np.int32]   # [6, 2]
+
+    deg: NDArray[np.float64]  # [6, 2] - [min, max] per joint
+    rad: NDArray[np.float64]  # [6, 2]
+    steps: NDArray[np.int32]  # [6, 2]
 
 
 @dataclass(frozen=True, slots=True)
 class JointLimits:
     """All joint limits."""
-    hard: Kinodynamic       # Hardware limits
-    jog: Kinodynamic        # Jog limits (reduced for safety)
+
+    hard: Kinodynamic  # Hardware limits
+    jog: Kinodynamic  # Jog limits (reduced for safety)
     position: JointPosition
 
 
 @dataclass(frozen=True, slots=True)
 class LinearAngular:
     """Cartesian linear/angular component pair (SI units)."""
-    linear: float   # m/s, m/s², or m/s³
+
+    linear: float  # m/s, m/s², or m/s³
     angular: float  # rad/s, rad/s², or rad/s³
 
 
 @dataclass(frozen=True, slots=True)
 class CartKinodynamic:
     """Cartesian kinodynamic limits with linear/angular components."""
+
     velocity: LinearAngular
     acceleration: LinearAngular
     jerk: LinearAngular
@@ -320,6 +338,7 @@ class CartKinodynamic:
 @dataclass(frozen=True, slots=True)
 class CartLimits:
     """All Cartesian limits."""
+
     hard: CartKinodynamic
     jog: CartKinodynamic
 
@@ -327,44 +346,68 @@ class CartLimits:
 @dataclass(frozen=True, slots=True)
 class RobotLimits:
     """Unified robot limits namespace."""
+
     joint: JointLimits
     cart: CartLimits
 
 
-def _build_kinodynamic(v_steps: ArrayLike, a_steps: ArrayLike, j_steps: ArrayLike) -> Kinodynamic:
+def _build_kinodynamic(
+    v_steps: ArrayLike, a_steps: ArrayLike, j_steps: ArrayLike
+) -> Kinodynamic:
     """Build Kinodynamic from step-based limits, with both SI and step units."""
     v_steps_arr = np.asarray(v_steps, dtype=np.int32)
     a_steps_arr = np.asarray(a_steps, dtype=np.int32)
     j_steps_arr = np.asarray(j_steps, dtype=np.int32)
-    v_rad = np.array([float(speed_steps_to_rad(v_steps_arr[i], idx=i)) for i in range(6)])
-    a_rad = np.array([float(speed_steps_to_rad(a_steps_arr[i], idx=i)) for i in range(6)])
-    j_rad = np.array([float(speed_steps_to_rad(j_steps_arr[i], idx=i)) for i in range(6)])
+    v_rad = np.array(
+        [float(speed_steps_to_rad(v_steps_arr[i], idx=i)) for i in range(6)]
+    )
+    a_rad = np.array(
+        [float(speed_steps_to_rad(a_steps_arr[i], idx=i)) for i in range(6)]
+    )
+    j_rad = np.array(
+        [float(speed_steps_to_rad(j_steps_arr[i], idx=i)) for i in range(6)]
+    )
     return Kinodynamic(
-        velocity=v_rad, acceleration=a_rad, jerk=j_rad,
-        velocity_steps=v_steps_arr, acceleration_steps=a_steps_arr, jerk_steps=j_steps_arr,
+        velocity=v_rad,
+        acceleration=a_rad,
+        jerk=j_rad,
+        velocity_steps=v_steps_arr,
+        acceleration_steps=a_steps_arr,
+        jerk_steps=j_steps_arr,
     )
 
 
 def _build_joint_position(limits_deg: NDArray) -> JointPosition:
     """Build JointPosition from degree limits."""
     limits_rad = np.deg2rad(limits_deg)
-    limits_steps = np.column_stack([
-        deg_to_steps(limits_deg[:, 0]),
-        deg_to_steps(limits_deg[:, 1]),
-    ])
+    limits_steps = np.column_stack(
+        [
+            deg_to_steps(limits_deg[:, 0]),
+            deg_to_steps(limits_deg[:, 1]),
+        ]
+    )
     return JointPosition(deg=limits_deg.copy(), rad=limits_rad, steps=limits_steps)
 
 
 def _build_cart_kinodynamic(
-    vel_lin_mm: float, vel_ang_deg: float,
-    acc_lin_mm: float, acc_ang_deg: float,
-    jerk_lin_mm: float, jerk_ang_deg: float,
+    vel_lin_mm: float,
+    vel_ang_deg: float,
+    acc_lin_mm: float,
+    acc_ang_deg: float,
+    jerk_lin_mm: float,
+    jerk_ang_deg: float,
 ) -> CartKinodynamic:
     """Build CartKinodynamic from mm/deg values, converting to SI."""
     return CartKinodynamic(
-        velocity=LinearAngular(linear=vel_lin_mm / 1000.0, angular=np.radians(vel_ang_deg)),
-        acceleration=LinearAngular(linear=acc_lin_mm / 1000.0, angular=np.radians(acc_ang_deg)),
-        jerk=LinearAngular(linear=jerk_lin_mm / 1000.0, angular=np.radians(jerk_ang_deg)),
+        velocity=LinearAngular(
+            linear=vel_lin_mm / 1000.0, angular=np.radians(vel_ang_deg)
+        ),
+        acceleration=LinearAngular(
+            linear=acc_lin_mm / 1000.0, angular=np.radians(acc_ang_deg)
+        ),
+        jerk=LinearAngular(
+            linear=jerk_lin_mm / 1000.0, angular=np.radians(jerk_ang_deg)
+        ),
     )
 
 
@@ -385,42 +428,54 @@ LIMITS: RobotLimits = RobotLimits(
     ),
     cart=CartLimits(
         hard=_build_cart_kinodynamic(
-            PAROL6_ROBOT.cart.vel.linear.max, PAROL6_ROBOT.cart.vel.angular.max,
-            PAROL6_ROBOT.cart.acc.linear.max, PAROL6_ROBOT.cart.acc.angular.max,
-            PAROL6_ROBOT.cart.jerk.linear.max, PAROL6_ROBOT.cart.jerk.angular.max,
+            PAROL6_ROBOT.cart.vel.linear.max,
+            PAROL6_ROBOT.cart.vel.angular.max,
+            PAROL6_ROBOT.cart.acc.linear.max,
+            PAROL6_ROBOT.cart.acc.angular.max,
+            PAROL6_ROBOT.cart.jerk.linear.max,
+            PAROL6_ROBOT.cart.jerk.angular.max,
         ),
         jog=_build_cart_kinodynamic(
-            PAROL6_ROBOT.cart.vel.jog.max, PAROL6_ROBOT.cart.vel.angular.max * 0.8,
-            PAROL6_ROBOT.cart.acc.linear.max, PAROL6_ROBOT.cart.acc.angular.max,
-            PAROL6_ROBOT.cart.jerk.linear.max, PAROL6_ROBOT.cart.jerk.angular.max,
+            PAROL6_ROBOT.cart.vel.jog.max,
+            PAROL6_ROBOT.cart.vel.angular.max * 0.8,
+            PAROL6_ROBOT.cart.acc.linear.max,
+            PAROL6_ROBOT.cart.acc.angular.max,
+            PAROL6_ROBOT.cart.jerk.linear.max,
+            PAROL6_ROBOT.cart.jerk.angular.max,
         ),
     ),
 )
 
 # Validate limits at module load
-if np.any(LIMITS.joint.hard.velocity <= 0) or np.any(LIMITS.joint.hard.acceleration <= 0):
+if np.any(LIMITS.joint.hard.velocity <= 0) or np.any(
+    LIMITS.joint.hard.acceleration <= 0
+):
     raise ValueError("Joint limits must be positive. Check PAROL6_ROBOT config.")
 
 # Jog min speeds (arbitrary minimums for speed% mapping)
-JOG_MIN_STEPS: int = 100          # steps/s (same for all joints)
-CART_LIN_JOG_MIN: float = 1.0     # mm/s
-CART_ANG_JOG_MIN: float = 1.0     # deg/s
+JOG_MIN_STEPS: int = 100  # steps/s (same for all joints)
+CART_LIN_JOG_MIN: float = 1.0  # mm/s
+CART_ANG_JOG_MIN: float = 1.0  # deg/s
 
 # Per-joint IK safety margins (radians) - [min_margin, max_margin] per joint
 # Direction-aware: J3 backwards bend (max) is a trap, but inward (min) is safe
-IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array([
-    [0.0, 0.0],   # J1 - base rotation, symmetric
-    [0.00, 0.05],   # J2 - shoulder, symmetric
-    [0.03, 0.8],   # J3 - elbow: min=inward (safe), max=backwards bend (TRAP)
-    [0.0, 0.0],   # J4 - wrist, symmetric
-    [0.0, 0.0],   # J5 - wrist, symmetric
-    [0.03, 0.03],   # J6 - tool rotation, symmetric
-], dtype=np.float64)
+IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(
+    [
+        [0.0, 0.0],  # J1 - base rotation, symmetric
+        [0.00, 0.05],  # J2 - shoulder, symmetric
+        [0.03, 0.8],  # J3 - elbow: min=inward (safe), max=backwards bend (TRAP)
+        [0.0, 0.0],  # J4 - wrist, symmetric
+        [0.0, 0.0],  # J5 - wrist, symmetric
+        [0.03, 0.03],  # J6 - tool rotation, symmetric
+    ],
+    dtype=np.float64,
+)
 
 
 # -----------------------------------------------------------------------------
 # Utility Functions
 # -----------------------------------------------------------------------------
+
 
 def compute_cart_velocity_limited_joints(
     q_current: NDArray,

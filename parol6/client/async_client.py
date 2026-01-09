@@ -901,9 +901,7 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "You must provide either a duration or a speed."
-            )
+            raise RuntimeError("You must provide either a duration or a speed.")
         message = wire.encode_move_joint(joint_angles, duration, speed, accel)
         result = await self._send(message)
         if wait and result:
@@ -930,9 +928,7 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "You must provide either a duration or a speed."
-            )
+            raise RuntimeError("You must provide either a duration or a speed.")
         message = wire.encode_move_pose(pose, duration, speed, accel)
         result = await self._send(message)
         if wait and result:
@@ -959,9 +955,7 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "You must provide either a duration or a speed."
-            )
+            raise RuntimeError("You must provide either a duration or a speed.")
         message = wire.encode_move_cartesian(pose, duration, speed, accel)
         result = await self._send(message)
         if wait and result:
@@ -992,9 +986,7 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "Error: You must provide either a duration or a speed."
-            )
+            raise RuntimeError("Error: You must provide either a duration or a speed.")
         message = wire.encode_move_cartesian_rel_trf(
             deltas, duration, speed, accel, profile, tracking
         )
@@ -1029,9 +1021,7 @@ class AsyncRobotClient:
             raise RuntimeError(
                 "Error: You must provide either a duration or a distance_deg."
             )
-        message = wire.encode_jog_joint(
-            joint_index, speed, duration, distance_deg
-        )
+        message = wire.encode_jog_joint(joint_index, speed, duration, distance_deg)
         return await self._send(message)
 
     async def jog_cartesian(
@@ -1280,15 +1270,11 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "Error: You must provide either duration or speed."
-            )
+            raise RuntimeError("Error: You must provide either duration or speed.")
         center_str = ",".join(map(str, center))
         clockwise_str = "CW" if clockwise else ""
         timing_str = (
-            f"DURATION|{duration}"
-            if duration is not None
-            else f"SPEED|{speed}"
+            f"DURATION|{duration}" if duration is not None else f"SPEED|{speed}"
         )
         parts = [
             "SMOOTH_CIRCLE",
@@ -1333,15 +1319,11 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "Error: You must provide either a duration or a speed."
-            )
+            raise RuntimeError("Error: You must provide either a duration or a speed.")
         end_str = ",".join(map(str, end_pose))
         center_str = ",".join(map(str, center))
         timing_str = (
-            f"DURATION|{duration}"
-            if duration is not None
-            else f"SPEED|{speed}"
+            f"DURATION|{duration}" if duration is not None else f"SPEED|{speed}"
         )
         parts = [
             "SMOOTH_ARC_CENTER",
@@ -1386,14 +1368,10 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "You must provide either a duration or a speed."
-            )
+            raise RuntimeError("You must provide either a duration or a speed.")
         end_str = ",".join(map(str, end_pose))
         timing_str = (
-            f"DURATION|{duration}"
-            if duration is not None
-            else f"SPEED|{speed}"
+            f"DURATION|{duration}" if duration is not None else f"SPEED|{speed}"
         )
         parts = [
             "SMOOTH_ARC_PARAM",
@@ -1432,9 +1410,7 @@ class AsyncRobotClient:
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
         if duration is None and speed is None:
-            raise RuntimeError(
-                "Error: You must provide either duration or speed."
-            )
+            raise RuntimeError("Error: You must provide either duration or speed.")
         num_waypoints = len(waypoints)
         timing_type = "DURATION" if duration is not None else "SPEED"
         timing_value = duration if duration is not None else speed
@@ -1453,7 +1429,6 @@ class AsyncRobotClient:
         if wait and result:
             await self.wait_motion_complete(**wait_kwargs)
         return result
-
 
     # --------------- Work coordinate helpers ---------------
 

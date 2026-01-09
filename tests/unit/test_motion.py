@@ -170,15 +170,20 @@ class TestTrajectoryBuilder:
         assert len(trajectory) == 1
         assert trajectory.duration == 0.0
 
-    @pytest.mark.parametrize("profile", [
-        ProfileType.LINEAR,
-        ProfileType.QUINTIC,
-        ProfileType.TRAPEZOID,
-        ProfileType.SCURVE,
-        ProfileType.TOPPRA,
-        ProfileType.RUCKIG,
-    ])
-    def test_trajectory_respects_joint_velocity_limits(self, simple_joint_path, profile):
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            ProfileType.LINEAR,
+            ProfileType.QUINTIC,
+            ProfileType.TRAPEZOID,
+            ProfileType.SCURVE,
+            ProfileType.TOPPRA,
+            ProfileType.RUCKIG,
+        ],
+    )
+    def test_trajectory_respects_joint_velocity_limits(
+        self, simple_joint_path, profile
+    ):
         """All profiles should produce trajectories within joint velocity limits."""
         builder = TrajectoryBuilder(
             joint_path=simple_joint_path,
@@ -206,12 +211,15 @@ class TestTrajectoryBuilder:
             f"{(max_vel_ratio - 1) * 100:.1f}%"
         )
 
-    @pytest.mark.parametrize("profile", [
-        ProfileType.LINEAR,
-        ProfileType.QUINTIC,
-        ProfileType.TRAPEZOID,
-        ProfileType.SCURVE,
-    ])
+    @pytest.mark.parametrize(
+        "profile",
+        [
+            ProfileType.LINEAR,
+            ProfileType.QUINTIC,
+            ProfileType.TRAPEZOID,
+            ProfileType.SCURVE,
+        ],
+    )
     def test_short_duration_enforces_limits(self, profile):
         """Profiles should extend duration when user-specified duration would violate limits."""
         # Create a path with large displacement

@@ -242,11 +242,8 @@ class SerialTransport:
         if self._reader_thread and self._reader_thread.is_alive():
             return self._reader_thread
 
-        # Ensure a short timeout for responsive shutdown
         if self.serial:
-            # Small block so as not to busy loop, but can't use a larger timout
-            # because serial will read until buffer is full or timeout.
-            self.serial.timeout = INTERVAL_S / 2
+            self.serial.timeout = INTERVAL_S
 
         def _run() -> None:
             self._reader_running = True
@@ -263,17 +260,20 @@ class SerialTransport:
                         time.sleep(0.1)
                         continue
                     try:
-                        # Check if data is available to avoid empty read syscalls
-                        iw = ser.in_waiting
-
-                        if iw <= 0:
-                            # No data available, short sleep and continue
-                            time.sleep(min(INTERVAL_S, 0.0015))
+                        # Blocking read releases GIL; OS wakes thread on data arrival
+                        first_byte = ser.read(1)
+                        if not first_byte:
                             continue
 
-                        # Read up to available bytes into preallocated scratch buffer
-                        k = min(iw, len(self._scratch))
-                        n = ser.readinto(self._scratch_mv[:k])
+                        iw = ser.in_waiting
+                        if iw > 0:
+                            k = min(iw, len(self._scratch) - 1)
+                            n = ser.readinto(self._scratch_mv[1 : k + 1])
+                            self._scratch[0] = first_byte[0]
+                            n += 1
+                        else:
+                            self._scratch[0] = first_byte[0]
+                            n = 1
                     except serial.SerialException as e:
                         logger.error(f"Serial reader error: {e}")
                         self.disconnect()

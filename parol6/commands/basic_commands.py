@@ -8,7 +8,6 @@ from math import ceil
 
 import numpy as np
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import (
     INTERVAL_S,
     JOG_MIN_STEPS,
@@ -239,18 +238,14 @@ class JogCommand(MotionCommand):
 
         distance_steps = 0
         if self.distance_deg is not None:
-            distance_steps = int(
-                deg_to_steps(abs(self.distance_deg), self.joint_index)
-            )
+            distance_steps = int(deg_to_steps(abs(self.distance_deg), self.joint_index))
             self.target_position = state.Position_in[self.joint_index] + (
                 distance_steps * self.direction
             )
 
             if not (min_limit <= self.target_position <= max_limit):
                 # Convert to degrees for clearer error message
-                target_deg = steps_to_deg(
-                    self.target_position, self.joint_index
-                )
+                target_deg = steps_to_deg(self.target_position, self.joint_index)
                 min_deg = steps_to_deg(min_limit, self.joint_index)
                 max_deg = steps_to_deg(max_limit, self.joint_index)
                 raise ValueError(
@@ -345,9 +340,7 @@ class JogCommand(MotionCommand):
             return ExecutionStatus.executing("Jogging (stopping)")
 
         # Set jog velocity for this joint (reuse buffer)
-        speed_rad = float(
-            speed_steps_to_rad(abs(self.speed_out), self.joint_index)
-        )
+        speed_rad = float(speed_steps_to_rad(abs(self.speed_out), self.joint_index))
         for i in range(6):
             self._jog_vel_buf[i] = 0.0
         self._jog_vel_buf[self.joint_index] = speed_rad * self.direction

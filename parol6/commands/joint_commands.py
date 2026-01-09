@@ -57,13 +57,13 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
 
     def do_setup(self, state: ControllerState) -> None:
         """Build trajectory from current position to target using unified motion pipeline."""
-        current_rad = np.asarray(
-            steps_to_rad(state.Position_in), dtype=np.float64
-        )
+        current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
         target_rad = self._get_target_rad(state)
 
         profile = state.joint_motion_profile
-        accel_pct = float(self.accel_percent) if self.accel_percent else DEFAULT_ACCEL_PERCENT
+        accel_pct = (
+            float(self.accel_percent) if self.accel_percent else DEFAULT_ACCEL_PERCENT
+        )
 
         joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)
         builder = TrajectoryBuilder(
@@ -151,7 +151,9 @@ class MovePoseCommand(JointMoveCommandBase):
 
     __slots__ = ("pose",)
 
-    def __init__(self, pose: list[float] | None = None, duration: float | None = None) -> None:
+    def __init__(
+        self, pose: list[float] | None = None, duration: float | None = None
+    ) -> None:
         super().__init__()
         self.pose: list[float] | None = pose
         self.duration = duration
@@ -180,9 +182,7 @@ class MovePoseCommand(JointMoveCommandBase):
 
     def _get_target_rad(self, state: ControllerState) -> np.ndarray:
         """Solve IK for target pose and return joint positions in radians."""
-        current_rad = np.asarray(
-            steps_to_rad(state.Position_in), dtype=np.float64
-        )
+        current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
 
         assert self.pose is not None
         target_pose = se3_from_rpy(

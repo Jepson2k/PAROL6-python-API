@@ -295,7 +295,9 @@ class SimulatorCommand(SystemCommand):
 
 
 # Valid motion profile types for joint and Cartesian moves
-VALID_JOINT_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "SCURVE", "LINEAR"))
+VALID_JOINT_PROFILES = frozenset(
+    ("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "SCURVE", "LINEAR")
+)
 VALID_CARTESIAN_PROFILES = frozenset(("TOPPRA", "LINEAR"))
 
 
@@ -328,7 +330,10 @@ class SetJointProfileCommand(SystemCommand):
         profile = parts[1].upper()
         if profile not in VALID_JOINT_PROFILES:
             valid_list = ", ".join(sorted(VALID_JOINT_PROFILES))
-            return False, f"Invalid joint profile '{parts[1]}'. Valid profiles: {valid_list}"
+            return (
+                False,
+                f"Invalid joint profile '{parts[1]}'. Valid profiles: {valid_list}",
+            )
 
         self.profile = profile
         logger.info(f"Parsed SETJOINTPROFILE: profile={self.profile}")
@@ -342,7 +347,9 @@ class SetJointProfileCommand(SystemCommand):
 
         old_profile = state.joint_motion_profile
         state.joint_motion_profile = self.profile
-        logger.info(f"SETJOINTPROFILE: Changed joint motion profile from {old_profile} to {self.profile}")
+        logger.info(
+            f"SETJOINTPROFILE: Changed joint motion profile from {old_profile} to {self.profile}"
+        )
 
         self.finish()
         return ExecutionStatus.completed(
@@ -379,7 +386,10 @@ class SetCartProfileCommand(SystemCommand):
         profile = parts[1].upper()
         if profile not in VALID_CARTESIAN_PROFILES:
             valid_list = ", ".join(sorted(VALID_CARTESIAN_PROFILES))
-            return False, f"Invalid Cartesian profile '{parts[1]}'. Valid profiles: {valid_list}"
+            return (
+                False,
+                f"Invalid Cartesian profile '{parts[1]}'. Valid profiles: {valid_list}",
+            )
 
         self.profile = profile
         logger.info(f"Parsed SETCARTPROFILE: profile={self.profile}")
@@ -393,7 +403,9 @@ class SetCartProfileCommand(SystemCommand):
 
         old_profile = state.cartesian_motion_profile
         state.cartesian_motion_profile = self.profile
-        logger.info(f"SETCARTPROFILE: Changed Cartesian motion profile from {old_profile} to {self.profile}")
+        logger.info(
+            f"SETCARTPROFILE: Changed Cartesian motion profile from {old_profile} to {self.profile}"
+        )
 
         self.finish()
         return ExecutionStatus.completed(

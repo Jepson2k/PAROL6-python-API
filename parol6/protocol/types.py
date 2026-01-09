@@ -91,6 +91,7 @@ class SendResult(TypedDict):
     completed: bool
     ack_time: datetime | None
 
+
 class PingResult(TypedDict):
     """Parsed PING response."""
 

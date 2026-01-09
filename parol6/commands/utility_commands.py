@@ -5,7 +5,12 @@ Contains utility commands like Delay
 
 import logging
 
-from parol6.commands.base import CommandBase, ExecutionStatus, SystemCommand, parse_float
+from parol6.commands.base import (
+    CommandBase,
+    ExecutionStatus,
+    SystemCommand,
+    parse_float,
+)
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState

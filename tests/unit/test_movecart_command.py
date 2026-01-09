@@ -73,7 +73,19 @@ class TestMoveCartCommandParsing:
     def test_parse_too_many_params_fails(self):
         """More than 10 parameters should fail."""
         cmd = MoveCartCommand()
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE", "50", "75", "EXTRA"]
+        parts = [
+            "MOVECART",
+            "100",
+            "200",
+            "300",
+            "0",
+            "0",
+            "0",
+            "NONE",
+            "50",
+            "75",
+            "EXTRA",
+        ]
         ok, err = cmd.do_match(parts)
 
         assert ok is False

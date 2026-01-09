@@ -2,8 +2,7 @@
 
 import pytest
 from parol6.commands.utility_commands import ResetCommand
-from parol6.server.state import ControllerState, GripperModeResetTracker
-from parol6.protocol.wire import CommandCode
+from parol6.server.state import ControllerState
 import numpy as np
 
 
@@ -32,7 +31,9 @@ class TestResetCommandExecution:
     def test_reset_clears_positions(self):
         """Reset should zero out position buffers."""
         state = ControllerState()
-        state.Position_in = np.array([1000, 2000, 3000, 4000, 5000, 6000], dtype=np.int32)
+        state.Position_in = np.array(
+            [1000, 2000, 3000, 4000, 5000, 6000], dtype=np.int32
+        )
         state.Speed_in = np.array([10, 20, 30, 40, 50, 60], dtype=np.int32)
 
         cmd = ResetCommand()

@@ -18,7 +18,9 @@ from parol6 import RobotClient
 class TestJogSpeedExtremes:
     """Test jog commands at minimum and maximum speeds."""
 
-    def test_jog_joint_slowest_speed_moves_robot(self, client: RobotClient, server_proc):
+    def test_jog_joint_slowest_speed_moves_robot(
+        self, client: RobotClient, server_proc
+    ):
         """
         Jog at slowest speed (1%) should still move the robot.
 
@@ -54,7 +56,9 @@ class TestJogSpeedExtremes:
             f"final={final_angles[0]:.4f})"
         )
 
-    def test_jog_joint_fastest_speed_moves_robot(self, client: RobotClient, server_proc):
+    def test_jog_joint_fastest_speed_moves_robot(
+        self, client: RobotClient, server_proc
+    ):
         """
         Jog at fastest speed (100%) should move the robot.
 

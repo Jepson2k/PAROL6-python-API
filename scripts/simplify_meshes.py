@@ -98,7 +98,7 @@ class QualityMetrics:
             f"  Sharp edges:  {self.sharp_edges_original:,} → {self.sharp_edges_simplified:,} "
             f"({self.sharp_edge_preservation:.0%} preserved)\n"
             f"  Hausdorff:    {self.hausdorff_normalized:.2%} of bounding box\n"
-            f"  File size:    {self.file_size_original/1024:.0f} KB → {self.file_size_simplified/1024:.0f} KB "
+            f"  File size:    {self.file_size_original / 1024:.0f} KB → {self.file_size_simplified / 1024:.0f} KB "
             f"({size_reduction:.0f}% smaller)\n"
             f"  Quality:      {status} - {reason}"
         )
@@ -112,7 +112,9 @@ def count_sharp_edges(mesh: trimesh.Trimesh, threshold_deg: float = 60) -> int:
     return int(np.sum(angles_deg > threshold_deg))
 
 
-def compute_hausdorff(original: trimesh.Trimesh, simplified: trimesh.Trimesh, samples: int = 5000) -> float:
+def compute_hausdorff(
+    original: trimesh.Trimesh, simplified: trimesh.Trimesh, samples: int = 5000
+) -> float:
     """Compute normalized Hausdorff distance."""
     bbox_diag = np.linalg.norm(original.bounding_box.extents)
     if bbox_diag == 0:
@@ -253,7 +255,8 @@ def process_stl_file(
     # Save to temp file to get size (or actual output)
     if preview_only:
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as f:
+
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
             temp_path = Path(f.name)
         o3d.io.write_triangle_mesh(str(temp_path), simplified)
         file_size_simplified = temp_path.stat().st_size
@@ -268,7 +271,9 @@ def process_stl_file(
         triangle_reduction=1 - len(simplified.triangles) / original_triangles,
         sharp_edges_original=original_sharp,
         sharp_edges_simplified=simplified_sharp,
-        sharp_edge_preservation=simplified_sharp / original_sharp if original_sharp > 0 else 1.0,
+        sharp_edge_preservation=simplified_sharp / original_sharp
+        if original_sharp > 0
+        else 1.0,
         hausdorff_normalized=hausdorff,
         file_size_original=input_path.stat().st_size,
         file_size_simplified=file_size_simplified,
@@ -323,6 +328,7 @@ def process_directory(
         except Exception as e:
             logger.error(f"Failed to process {stl_file.name}: {e}")
             import traceback
+
             traceback.print_exc()
 
     return results
@@ -346,44 +352,52 @@ which is better suited for CAD meshes than generic decimation algorithms.
     )
 
     parser.add_argument(
-        "--input", "-i",
+        "--input",
+        "-i",
         type=Path,
         help="Single STL file to process",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         help="Output file path (default: <input>_simplified.stl)",
     )
     parser.add_argument(
-        "--mesh-dir", "-d",
+        "--mesh-dir",
+        "-d",
         type=Path,
         default=DEFAULT_MESH_DIR,
         help=f"Directory containing STL files (default: {DEFAULT_MESH_DIR})",
     )
     parser.add_argument(
-        "--target", "-t",
+        "--target",
+        "-t",
         type=float,
         help="Target ratio of triangles to keep (0.0-1.0). Disables auto-optimization.",
     )
     parser.add_argument(
-        "--max-hausdorff", "-m",
+        "--max-hausdorff",
+        "-m",
         type=float,
         default=0.003,
         help="Maximum Hausdorff distance (fraction of bounding box, default: 0.003 = 0.3%%)",
     )
     parser.add_argument(
-        "--preview", "-p",
+        "--preview",
+        "-p",
         action="store_true",
         help="Preview metrics without saving",
     )
     parser.add_argument(
-        "--skip-existing", "-s",
+        "--skip-existing",
+        "-s",
         action="store_true",
         help="Skip files that already have simplified versions",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable verbose output",
     )
@@ -431,7 +445,7 @@ which is better suited for CAD meshes than generic decimation algorithms.
             total_simp = sum(m.file_size_simplified for _, m in results)
             reduction = (1 - total_simp / total_orig) * 100
             logger.info(
-                f"Total: {total_orig/1024/1024:.2f} MB → {total_simp/1024/1024:.2f} MB "
+                f"Total: {total_orig / 1024 / 1024:.2f} MB → {total_simp / 1024 / 1024:.2f} MB "
                 f"({reduction:.0f}% reduction)"
             )
 

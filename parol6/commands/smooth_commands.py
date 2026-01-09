@@ -14,8 +14,7 @@ from numpy.typing import NDArray
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, Slerp
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.commands.base import ExecutionStatus, TrajectoryMoveCommandBase
+from parol6.commands.base import TrajectoryMoveCommandBase
 from parol6.config import CONTROL_RATE_HZ, INTERVAL_S, steps_to_rad
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.server.command_registry import register_command
@@ -42,11 +41,18 @@ _PLANE_NORMALS_TRF: dict[str, NDArray] = {
 }
 
 
-def _pose6_trf_to_wrf(pose6_mm_deg: Sequence[float], tool_pose: "sp.SE3") -> list[float]:
+def _pose6_trf_to_wrf(
+    pose6_mm_deg: Sequence[float], tool_pose: "sp.SE3"
+) -> list[float]:
     """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
     pose_trf = se3_from_rpy(
-        pose6_mm_deg[0] / 1000.0, pose6_mm_deg[1] / 1000.0, pose6_mm_deg[2] / 1000.0,
-        pose6_mm_deg[3], pose6_mm_deg[4], pose6_mm_deg[5], degrees=True,
+        pose6_mm_deg[0] / 1000.0,
+        pose6_mm_deg[1] / 1000.0,
+        pose6_mm_deg[2] / 1000.0,
+        pose6_mm_deg[3],
+        pose6_mm_deg[4],
+        pose6_mm_deg[5],
+        degrees=True,
     )
     pose_wrf = tool_pose * pose_trf
     return np.concatenate(
@@ -122,7 +128,9 @@ class _ShapeGenerator:
     """Base class for geometry generation (circles, arcs, splines)."""
 
     def __init__(self, control_rate: float | None = None):
-        self.control_rate = control_rate if control_rate is not None else CONTROL_RATE_HZ
+        self.control_rate = (
+            control_rate if control_rate is not None else CONTROL_RATE_HZ
+        )
 
     def _get_perpendicular_vector(self, v: np.ndarray) -> np.ndarray:
         """Find a vector perpendicular to the given vector."""
@@ -169,7 +177,8 @@ class CircularMotion(_ShapeGenerator):
         if chord_length > 2 * radius:
             logger.warning(
                 "Points too far apart (%.1fmm) for radius %.1fmm, adjusting",
-                chord_length, radius
+                chord_length,
+                radius,
             )
             radius = chord_length / 2 + 1
 
@@ -195,18 +204,21 @@ class CircularMotion(_ShapeGenerator):
             # XY plane arc
             normal_np = np.array([0, 0, 1])
             if chord_length > 0:
-                perp_2d = np.array([
-                    -(end_xyz[1] - start_xyz[1]),
-                    end_xyz[0] - start_xyz[0]
-                ])
+                perp_2d = np.array(
+                    [-(end_xyz[1] - start_xyz[1]), end_xyz[0] - start_xyz[0]]
+                )
                 perp_2d = perp_2d / np.linalg.norm(perp_2d)
                 center_2d = chord_mid[:2] + ((-h if clockwise else h) * perp_2d)
-                center = np.array([center_2d[0], center_2d[1], (start_xyz[2] + end_xyz[2]) / 2])
+                center = np.array(
+                    [center_2d[0], center_2d[1], (start_xyz[2] + end_xyz[2]) / 2]
+                )
             else:
                 center = start_xyz.copy()
 
         return self.generate_arc(
-            start_pose, end_pose, center,
+            start_pose,
+            end_pose,
+            center,
             normal=normal_np if normal is not None else None,
             clockwise=clockwise,
             duration=duration,
@@ -330,14 +342,14 @@ class CircularMotion(_ShapeGenerator):
 
         return trajectory
 
-    def _rotation_matrix_from_axis_angle(self, axis: np.ndarray, angle: float) -> np.ndarray:
+    def _rotation_matrix_from_axis_angle(
+        self, axis: np.ndarray, angle: float
+    ) -> np.ndarray:
         """Generate rotation matrix using Rodrigues' formula."""
         axis = axis / np.linalg.norm(axis)
-        K = np.array([
-            [0, -axis[2], axis[1]],
-            [axis[2], 0, -axis[0]],
-            [-axis[1], axis[0], 0]
-        ])
+        K = np.array(
+            [[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]]
+        )
         return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
 
     def _slerp_orientation(
@@ -460,7 +472,9 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
         self.frame: str = "WRF"
         self.normal_vector: list[float] | None = None
 
-    def _transform_params(self, command_type: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _transform_params(
+        self, command_type: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Transform params from TRF to WRF if needed. No-op for WRF frame."""
         return _transform_command_params_to_wrf(command_type, params, self.frame)
 
@@ -516,9 +530,7 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
             self.fail("Trajectory generation returned empty result")
             return
 
-        current_q = np.asarray(
-            steps_to_rad(state.Position_in), dtype=np.float64
-        )
+        current_q = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
 
         try:
             joint_path = JointPath.from_poses(
@@ -606,7 +618,11 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             if idx < len(parts) and self._is_clockwise(parts[idx]):
                 self.clockwise = True
                 idx += 1
-            if idx < len(parts) and parts[idx].upper() in ("ABSOLUTE", "TOOL", "RELATIVE"):
+            if idx < len(parts) and parts[idx].upper() in (
+                "ABSOLUTE",
+                "TOOL",
+                "RELATIVE",
+            ):
                 self.center_mode = parts[idx].upper()
 
             self.description = f"circle (r={self.radius}mm)"
@@ -638,10 +654,16 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         if self.center_mode == "TOOL":
             actual_center = np.array(effective_start_pose[:3])
         elif self.center_mode == "RELATIVE":
-            center_np = np.asarray(self.center, dtype=float) if self.center is not None else np.zeros(3)
+            center_np = (
+                np.asarray(self.center, dtype=float)
+                if self.center is not None
+                else np.zeros(3)
+            )
             actual_center = np.array(effective_start_pose[:3]) + center_np
         else:
-            actual_center = np.array(self.center) if self.center is not None else np.zeros(3)
+            actual_center = (
+                np.array(self.center) if self.center is not None else np.zeros(3)
+            )
 
         trajectory = motion_gen.generate_circle(
             center=actual_center,
@@ -907,14 +929,19 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
             return 0.0
         length = 0.0
         for i in range(1, len(self.waypoints)):
-            length += float(np.linalg.norm(
-                np.array(self.waypoints[i][:3]) - np.array(self.waypoints[i - 1][:3])
-            ))
+            length += float(
+                np.linalg.norm(
+                    np.array(self.waypoints[i][:3])
+                    - np.array(self.waypoints[i - 1][:3])
+                )
+            )
         return length
 
     def do_setup(self, state: "ControllerState") -> None:
         """Transform parameters if in TRF."""
-        transformed = self._transform_params("SMOOTH_SPLINE", {"waypoints": self.waypoints})
+        transformed = self._transform_params(
+            "SMOOTH_SPLINE", {"waypoints": self.waypoints}
+        )
         self.waypoints = transformed["waypoints"]
         return super().do_setup(state)
 

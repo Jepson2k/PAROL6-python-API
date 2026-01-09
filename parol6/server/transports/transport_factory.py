@@ -61,8 +61,8 @@ def create_transport(
     # Create appropriate transport
     if transport_type == "mock":
         logger.info("Creating MockSerialProcessAdapter for simulation")
-        transport: MockSerialProcessAdapter | SerialTransport = MockSerialProcessAdapter(
-            port=port, baudrate=baudrate, **kwargs
+        transport: MockSerialProcessAdapter | SerialTransport = (
+            MockSerialProcessAdapter(port=port, baudrate=baudrate, **kwargs)
         )
 
     elif transport_type == "serial":

@@ -67,6 +67,7 @@ def _get_cached_ik_data(robot: "DHRobot") -> tuple:
         _ik_cache["buffered_max"],
     )
 
+
 # This dictionary maps descriptive axis names to movement vectors
 # Format: ([x, y, z], [rx, ry, rz])
 AXIS_MAP = {
@@ -152,7 +153,14 @@ def solve_ik(
     target_matrix = target_pose.matrix()
 
     result = ets.ik_LM(
-        target_matrix, q0=cq, tol=1e-10, joint_limits=True, k=0.0, method="sugihara", ilimit=10, slimit=33
+        target_matrix,
+        q0=cq,
+        tol=1e-10,
+        joint_limits=True,
+        k=0.0,
+        method="sugihara",
+        ilimit=10,
+        slimit=33,
     )  # Small tol needed so it moves at slow speeds
 
     q = result[0]

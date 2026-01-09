@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6 import config as cfg
 from parol6.commands.base import ExecutionStatus, QueryCommand
 from parol6.server.command_registry import register_command

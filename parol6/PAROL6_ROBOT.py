@@ -143,9 +143,13 @@ _joint_max_acc: Vec6i = (_joint_max_speed * 3).astype(np.int32)
 _joint_max_jerk: Vec6i = (_joint_max_acc * 10).astype(np.int32)
 
 # Compute joint angular velocities/accelerations in rad/s
-_joint_speed_rad = _joint_max_speed.astype(float) * radian_per_step_constant / _joint_ratio
+_joint_speed_rad = (
+    _joint_max_speed.astype(float) * radian_per_step_constant / _joint_ratio
+)
 _joint_acc_rad = _joint_max_acc.astype(float) * radian_per_step_constant / _joint_ratio
-_joint_jerk_rad = _joint_max_jerk.astype(float) * radian_per_step_constant / _joint_ratio
+_joint_jerk_rad = (
+    _joint_max_jerk.astype(float) * radian_per_step_constant / _joint_ratio
+)
 
 
 def _compute_tcp_velocity_at_config(
@@ -220,10 +224,14 @@ def _compute_jacobian_velocity_bound() -> tuple[float, float]:
 
     for _ in range(n_samples):
         # Random config within joint limits
-        q = np.array([
-            np.random.uniform(_joint_limits_radian[j, 0], _joint_limits_radian[j, 1])
-            for j in range(6)
-        ])
+        q = np.array(
+            [
+                np.random.uniform(
+                    _joint_limits_radian[j, 0], _joint_limits_radian[j, 1]
+                )
+                for j in range(6)
+            ]
+        )
 
         # Test X, Y, Z directions
         for direction in range(3):
@@ -258,10 +266,14 @@ def _compute_jacobian_accel_bound() -> tuple[float, float]:
     accelerations = []
 
     for _ in range(n_samples):
-        q = np.array([
-            np.random.uniform(_joint_limits_radian[j, 0], _joint_limits_radian[j, 1])
-            for j in range(6)
-        ])
+        q = np.array(
+            [
+                np.random.uniform(
+                    _joint_limits_radian[j, 0], _joint_limits_radian[j, 1]
+                )
+                for j in range(6)
+            ]
+        )
 
         for direction in range(3):
             a = _compute_tcp_velocity_at_config(q, direction, _joint_acc_rad)
@@ -292,10 +304,14 @@ def _compute_jacobian_jerk_bound() -> tuple[float, float]:
     jerks = []
 
     for _ in range(n_samples):
-        q = np.array([
-            np.random.uniform(_joint_limits_radian[j, 0], _joint_limits_radian[j, 1])
-            for j in range(6)
-        ])
+        q = np.array(
+            [
+                np.random.uniform(
+                    _joint_limits_radian[j, 0], _joint_limits_radian[j, 1]
+                )
+                for j in range(6)
+            ]
+        )
 
         for direction in range(3):
             j = _compute_tcp_velocity_at_config(q, direction, _joint_jerk_rad)
@@ -399,11 +415,13 @@ def log_derived_limits() -> None:
     )
     logger.info("================================")
 
+
 # Standby positions
 _standby_deg: Vec6f = np.array([90.0, -90.0, 180.0, 0.0, 0.0, 180.0], dtype=np.float64)
 
 # Initialize Cartesian limits (depends on robot model and standby positions)
 _init_cartesian_limits()
+
 
 # -----------------------------
 # Typed hierarchical API
@@ -411,15 +429,16 @@ _init_cartesian_limits()
 @dataclass(frozen=True)
 class Joint:
     """Minimal joint configuration - all values in native units (deg for position, steps/s for speed)."""
+
     limits_deg: Limits2f  # Position limits in degrees [6, 2]
-    speed_max: Vec6i      # Max speed in steps/s
-    speed_min: Vec6i      # Min speed in steps/s
+    speed_max: Vec6i  # Max speed in steps/s
+    speed_min: Vec6i  # Min speed in steps/s
     jog_speed_max: Vec6i  # Max jog speed in steps/s
     jog_speed_min: Vec6i  # Min jog speed in steps/s
-    acc_max: Vec6i        # Max acceleration in steps/s²
-    jerk_max: Vec6i       # Max jerk in steps/s³
-    ratio: Vec6f          # Gear ratio per joint
-    standby_deg: Vec6f    # Standby position in degrees
+    acc_max: Vec6i  # Max acceleration in steps/s²
+    jerk_max: Vec6i  # Max jerk in steps/s³
+    ratio: Vec6f  # Gear ratio per joint
+    standby_deg: Vec6f  # Standby position in degrees
 
 
 @dataclass(frozen=True)
@@ -499,6 +518,7 @@ conv: Final[Conv] = Conv(
     deg_sec_to_rad_sec=deg_per_sec_2_radian_per_sec_const,
 )
 
+
 # -----------------------------
 # CAN helpers and bitfield utils (used by transports/gripper)
 # -----------------------------
@@ -531,6 +551,7 @@ def split_2_bitfield(var_in: int) -> list[int]:
 if __name__ == "__main__":
     # Simple sanity prints
     from parol6.config import steps_to_rad
+
     j_step_rad = steps_to_rad(np.array([1, 1, 1, 1, 1, 1], dtype=np.int32))
     print("Smallest step (deg):", np.rad2deg(j_step_rad))
     print("Standby deg:", joint.standby_deg)

@@ -47,11 +47,12 @@ dependencies = [
     "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.5/roboticstoolbox_python-1.2.5-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl ; python_version == '3.13' and platform_system == 'Linux' and platform_machine == 'aarch64'",
     "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.5/roboticstoolbox_python-1.2.5-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl ; python_version == '3.14' and platform_system == 'Linux' and platform_machine == 'aarch64'",
 
-    "pyserial",
+    "pyserial>=3.4",
     "scipy>=1.11.4",
     "ruckig>=0.12.2",
     "toppra>=0.6.3",
-    "interpolatepy",
+    "interpolatepy>=2.0.0",
+    "sophuspy>=1.0.1",
 ]
 
 [tool.setuptools.packages.find]
@@ -121,7 +122,7 @@ filterwarnings = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["roboticstoolbox", "roboticstoolbox.*", "spatialmath", "spatialmath.*", "sophuspy", "sophuspy.*", "ruckig", "ruckig.*", "toppra", "toppra.*", "interpolatepy", "interpolatepy.*"]
+module = ["roboticstoolbox", "roboticstoolbox.*", "spatialmath", "spatialmath.*", "sophuspy", "sophuspy.*", "ruckig", "ruckig.*", "toppra", "toppra.*", "interpolatepy", "interpolatepy.*", "scipy", "scipy.*", "serial", "serial.*"]
 ignore_missing_imports = true
 
 [tool.setuptools]

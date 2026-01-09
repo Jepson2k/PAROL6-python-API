@@ -7,7 +7,6 @@ via IKWorkerClient for true CPU parallelism.
 
 import threading
 import time
-from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -84,7 +83,7 @@ class StatusCache:
 
     def __del__(self) -> None:
         """Clean up IK worker on destruction."""
-        if hasattr(self, '_ik_client') and self._ik_client:
+        if hasattr(self, "_ik_client") and self._ik_client:
             self._ik_client.stop()
 
     def _format_csv_from_list(self, vals: ArrayLike) -> str:
@@ -114,9 +113,7 @@ class StatusCache:
                     self._last_tool_name = state.current_tool
 
                 # Vectorized steps->deg
-                self.angles_deg = np.asarray(
-                    steps_to_deg(state.Position_in)
-                )
+                self.angles_deg = np.asarray(steps_to_deg(state.Position_in))
                 self._angles_ascii = self._format_csv_from_list(self.angles_deg)
                 changed_any = True
 
@@ -128,9 +125,7 @@ class StatusCache:
 
                 # Submit IK request asynchronously
                 try:
-                    q_rad = np.asarray(
-                        steps_to_rad(state.Position_in), dtype=float
-                    )
+                    q_rad = np.asarray(steps_to_rad(state.Position_in), dtype=float)
                     T_matrix = get_fkine_matrix(state)
                     self._ik_client.submit_request(q_rad, T_matrix)
                 except Exception:
@@ -142,9 +137,15 @@ class StatusCache:
                 self.joint_en[:] = results[0]
                 self.cart_en_wrf[:] = results[1]
                 self.cart_en_trf[:] = results[2]
-                self._joint_en_ascii = self._format_csv_from_list(self.joint_en.tolist())
-                self._cart_en_wrf_ascii = self._format_csv_from_list(self.cart_en_wrf.tolist())
-                self._cart_en_trf_ascii = self._format_csv_from_list(self.cart_en_trf.tolist())
+                self._joint_en_ascii = self._format_csv_from_list(
+                    self.joint_en.tolist()
+                )
+                self._cart_en_wrf_ascii = self._format_csv_from_list(
+                    self.cart_en_wrf.tolist()
+                )
+                self._cart_en_trf_ascii = self._format_csv_from_list(
+                    self.cart_en_trf.tolist()
+                )
                 changed_any = True
 
             # 2) IO (first 5)

@@ -53,7 +53,9 @@ class ControllerState:
 
     # Streaming executors for online motion (jogging/streaming)
     streaming_executor: "StreamingExecutor | None" = None  # Joint-space Ruckig
-    cartesian_streaming_executor: "CartesianStreamingExecutor | None" = None  # Cartesian Ruckig
+    cartesian_streaming_executor: "CartesianStreamingExecutor | None" = (
+        None  # Cartesian Ruckig
+    )
 
     # Tool configuration (affects kinematics and visualization)
     _current_tool: str = "NONE"
