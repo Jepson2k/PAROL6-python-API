@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 if TYPE_CHECKING:
     pass
@@ -160,9 +161,7 @@ def get_com_port_with_fallback() -> str:
     return ""
 
 
-import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from numpy.typing import ArrayLike
-from typing import Union
+import parol6.PAROL6_ROBOT as PAROL6_ROBOT  # noqa: E402 - must be after steps_to_rad() definition due to circular import
 
 # Type alias for conversion function return types
 IndexArg = Union[int, NDArray[np.int_], None]
@@ -282,8 +281,6 @@ def speed_rad_to_steps(
 #   LIMITS.cart.hard.velocity.linear   → linear velocity limit (m/s)
 #   LIMITS.cart.hard.velocity.angular  → angular velocity limit (rad/s)
 #   LIMITS.cart.jog.velocity.linear    → jog linear velocity limit (m/s)
-
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)

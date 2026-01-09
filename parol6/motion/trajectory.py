@@ -19,14 +19,12 @@ from enum import Enum
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+from numpy.typing import NDArray
+from ruckig import InputParameter, OutputParameter, Result, Ruckig
+
 import toppra as ta
 import toppra.algorithm as algo
 import toppra.constraint as constraint
-
-# Silence toppra's verbose debug output
-logging.getLogger("toppra").setLevel(logging.INFO)
-from numpy.typing import NDArray
-from ruckig import InputParameter, OutputParameter, Result, Ruckig
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
@@ -35,6 +33,9 @@ from parol6.utils.se3_utils import se3_from_rpy
 
 if TYPE_CHECKING:
     import sophuspy as sp
+
+# Silence toppra's verbose debug output
+logging.getLogger("toppra").setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
 
