@@ -26,7 +26,8 @@ class MockState:
         self.Position_out = np.zeros(6, dtype=np.int32)
         self.Speed_out = np.zeros(6, dtype=np.int32)
         self.Command_out = 0
-        self.motion_profile = "RUCKIG"
+        self.joint_motion_profile = "TOPPRA"
+        self.cartesian_motion_profile = "TOPPRA"
         self.stream_mode = False
         self.streaming_executor = None
 
@@ -198,7 +199,7 @@ class TestRuckigExecution:
         assert ok and err is None
 
         state = MockState()
-        state.motion_profile = "RUCKIG"
+        state.joint_motion_profile = "RUCKIG"
 
         cmd.do_setup(state)
 

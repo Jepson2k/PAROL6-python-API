@@ -124,4 +124,5 @@ class ResetCommand(SystemCommand):
         """Reset state immediately."""
         state.reset()
         logger.debug("RESET command executed")
+        self.is_finished = True
         return ExecutionStatus.completed("Reset complete")

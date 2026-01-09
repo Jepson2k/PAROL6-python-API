@@ -26,7 +26,7 @@ class TestResetCommandParsing:
 
 
 class TestResetCommandExecution:
-    """Test ResetCommand.setup resets state correctly."""
+    """Test ResetCommand.tick resets state correctly."""
 
     def test_reset_clears_positions(self):
         """Reset should zero out position buffers."""
@@ -38,7 +38,7 @@ class TestResetCommandExecution:
 
         cmd = ResetCommand()
         cmd.do_match(["RESET"])
-        cmd.setup(state)
+        cmd.tick(state)  # Reset executes in tick, not setup
 
         assert np.all(state.Position_in == 0)
         assert np.all(state.Speed_in == 0)
@@ -52,7 +52,7 @@ class TestResetCommandExecution:
 
         cmd = ResetCommand()
         cmd.do_match(["RESET"])
-        cmd.setup(state)
+        cmd.tick(state)  # Reset executes in tick, not setup
 
         assert state.e_stop_active is False
         assert state.soft_error is False
@@ -65,7 +65,7 @@ class TestResetCommandExecution:
 
         cmd = ResetCommand()
         cmd.do_match(["RESET"])
-        cmd.setup(state)
+        cmd.tick(state)  # Reset executes in tick, not setup
 
         assert state._current_tool == "NONE"
 
@@ -78,7 +78,7 @@ class TestResetCommandExecution:
 
         cmd = ResetCommand()
         cmd.do_match(["RESET"])
-        cmd.setup(state)
+        cmd.tick(state)  # Reset executes in tick, not setup
 
         assert len(state.command_queue) == 0
         assert len(state.incoming_command_buffer) == 0
@@ -93,7 +93,7 @@ class TestResetCommandExecution:
 
         cmd = ResetCommand()
         cmd.do_match(["RESET"])
-        cmd.setup(state)
+        cmd.tick(state)  # Reset executes in tick, not setup
 
         assert state.ip == "192.168.1.100"
         assert state.port == 9999
@@ -101,11 +101,11 @@ class TestResetCommandExecution:
         assert state.ser == "mock_serial"
 
     def test_reset_finishes_immediately(self):
-        """Reset command should complete in setup, not tick."""
+        """Reset command should complete in single tick."""
         state = ControllerState()
         cmd = ResetCommand()
         cmd.do_match(["RESET"])
-        cmd.setup(state)
+        cmd.tick(state)  # Reset completes in single tick
 
         assert cmd.is_finished is True
 
