@@ -77,9 +77,9 @@ class IKWorkerClient:
             self._input_mv = memoryview(self._input_shm.buf)
             self._output_mv = memoryview(self._output_shm.buf)
 
-            # Initialize with zeros
-            self._input_mv[:] = bytes(IK_INPUT_SHM_SIZE)
-            self._output_mv[:] = bytes(IK_OUTPUT_SHM_SIZE)
+            # Initialize with zeros (use numpy for cross-platform compatibility)
+            np.frombuffer(self._input_shm.buf, dtype=np.uint8)[:] = 0
+            np.frombuffer(self._output_shm.buf, dtype=np.uint8)[:] = 0
 
             # Spawn subprocess
             self._shutdown_event = multiprocessing.Event()

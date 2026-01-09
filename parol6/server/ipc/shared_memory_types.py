@@ -193,13 +193,13 @@ def pack_ik_response(
 ) -> None:
     """Pack IK response into output shared memory buffer."""
     layout = IKOutputLayout
-    buf[layout.JOINT_EN_OFFSET : layout.JOINT_EN_OFFSET + 12] = bytes(joint_en[:12])
-    buf[layout.CART_EN_WRF_OFFSET : layout.CART_EN_WRF_OFFSET + 12] = bytes(
-        cart_en_wrf[:12]
-    )
-    buf[layout.CART_EN_TRF_OFFSET : layout.CART_EN_TRF_OFFSET + 12] = bytes(
-        cart_en_trf[:12]
-    )
+    buf[layout.JOINT_EN_OFFSET : layout.JOINT_EN_OFFSET + 12] = joint_en[:12].tobytes()
+    buf[layout.CART_EN_WRF_OFFSET : layout.CART_EN_WRF_OFFSET + 12] = cart_en_wrf[
+        :12
+    ].tobytes()
+    buf[layout.CART_EN_TRF_OFFSET : layout.CART_EN_TRF_OFFSET + 12] = cart_en_trf[
+        :12
+    ].tobytes()
     struct.pack_into("<Q", buf, layout.RESP_SEQ_OFFSET, resp_seq)
 
 
