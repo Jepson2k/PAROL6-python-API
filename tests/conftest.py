@@ -6,6 +6,7 @@ environment configuration, and test utilities used across the test suite.
 """
 
 import logging
+import multiprocessing
 import os
 import signal
 import sys
@@ -14,6 +15,14 @@ from collections.abc import Generator
 from dataclasses import dataclass
 
 import pytest
+
+# Force multiprocessing to use 'spawn' instead of 'fork' on Unix platforms
+# This prevents fork-safety issues with C extensions during tests
+if sys.platform.startswith("linux") or sys.platform == "darwin":
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass  # Already set
 
 # Add the parent directory to Python path so we can import the API modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

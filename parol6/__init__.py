@@ -11,6 +11,18 @@ Key components:
 - manage_server: Convenience function to start a controller process
 - is_server_running: Helper to probe for an existing controller
 """
+import multiprocessing
+import sys
+
+# Force multiprocessing to use 'spawn' instead of 'fork' on all platforms
+# This prevents fork-safety issues with C extensions (numpy, scipy, robotics-toolbox)
+# that initialize thread pools at import time. Must be set before any imports that
+# use multiprocessing or before the first Process() is created.
+if sys.platform.startswith("linux") or sys.platform == "darwin":
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass  # Already set (e.g., by test framework or parent process)
 
 from . import PAROL6_ROBOT
 from ._version import __version__
