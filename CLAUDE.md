@@ -34,9 +34,15 @@ PAROL6 Python API is a lightweight client and headless controller for PAROL6 6-D
 ## Build & Test Commands
 
 ```bash
-# Development setup
+# Development setup (standard)
 pip install -e .[dev]
 pre-commit install
+
+# Minimal installation (removes unnecessary rtb-data package)
+./install-minimal.sh
+# OR manually:
+pip install -e .[dev]
+pip uninstall -y rtb-data  # Optional: saves ~200MB disk space
 
 # Linting & formatting
 ruff check .
@@ -82,6 +88,20 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 2. Implement `match(parts)`, `setup(state)`, and `tick(state)` lifecycle methods
 3. For motion commands, set `streamable=True` if supporting high-rate streaming
 4. Use helpers from `parol6/commands/base.py` (parsers, motion profiles)
+
+## Dependencies
+
+### roboticstoolbox-python and rtb-data
+
+PAROL6 uses a custom fork of `roboticstoolbox-python` for numerical inverse kinematics. This library includes `rtb-data` (~200MB) as a required dependency, containing standard robot models (Puma, UR5, etc.).
+
+**PAROL6 does not use rtb-data** - we only use our own URDF files from `parol6/urdf_model/`. The rtb-data package can be safely uninstalled after installation:
+
+```bash
+pip uninstall rtb-data
+```
+
+Use `./install-minimal.sh` to automatically install without rtb-data.
 
 ## Environment Variables
 
