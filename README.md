@@ -15,12 +15,6 @@ It supports a controller process speaking a simple text-based UDP protocol. The 
 pip install .
 ```
 
-**Note:** The `roboticstoolbox-python` dependency will pull in `rtb-data` (~200MB of standard robot models like Puma, UR5, etc.). PAROL6 does not use these models - we use our own custom URDF files. You can optionally uninstall rtb-data after installation to save disk space:
-
-```bash
-pip uninstall rtb-data
-```
-
 To launch the controller after installation:
 
 ```bash

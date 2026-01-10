@@ -11,11 +11,6 @@ requires-python = ">=3.10"
 dependencies = [
     # Using custom-built robotics-toolbox-python wheels from forked repository
     # https://github.com/Jepson2k/robotics-toolbox-python/releases/tag/v1.2.5
-    #
-    # NOTE: roboticstoolbox-python lists rtb-data (~200MB of robot models) as a required
-    # dependency, but PAROL6 does not use any of those models (we use our own URDF files
-    # stored in parol6/urdf_model/). The rtb-data package can be safely uninstalled after
-    # installation with: pip uninstall rtb-data
 
     # macOS ARM64 (Apple Silicon)
     "roboticstoolbox-python @ https://github.com/Jepson2k/robotics-toolbox-python/releases/download/v1.2.5/roboticstoolbox_python-1.2.5-cp310-cp310-macosx_11_0_arm64.whl ; python_version == '3.10' and platform_system == 'Darwin' and platform_machine == 'arm64'",
