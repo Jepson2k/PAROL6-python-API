@@ -49,6 +49,7 @@ dependencies = [
 
     "pyserial>=3.4",
     "scipy>=1.11.4",
+    "numpy<2.0.0",
     "ruckig>=0.12.2",
     "toppra>=0.6.3",
     "interpolatepy>=2.0.0",
