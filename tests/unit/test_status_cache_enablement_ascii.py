@@ -24,7 +24,7 @@ def test_ik_worker_detects_joint_limits():
     client.start()
 
     try:
-        time.sleep(0.2)
+        time.sleep(0.5)  # Allow more time for subprocess startup on Windows
         assert client.is_alive(), "IK worker failed to start"
 
         # Start from home position and move J1 near its max limit
@@ -42,11 +42,11 @@ def test_ik_worker_detects_joint_limits():
         client.submit_request(q, T_matrix)
 
         result = None
-        for _ in range(100):
+        for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
             result = client.get_results_if_ready()
             if result is not None:
                 break
-            time.sleep(0.01)
+            time.sleep(0.02)
 
         assert result is not None, "IK worker did not return results"
         joint_en, _, _ = result
@@ -68,11 +68,11 @@ def test_ik_worker_detects_joint_limits():
         client.submit_request(q, T_matrix)
 
         result = None
-        for _ in range(100):
+        for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
             result = client.get_results_if_ready()
             if result is not None:
                 break
-            time.sleep(0.01)
+            time.sleep(0.02)
 
         assert result is not None, "IK worker did not return results for min limit test"
         joint_en, _, _ = result
@@ -98,7 +98,7 @@ def test_ik_worker_all_enabled_in_safe_position():
     client.start()
 
     try:
-        time.sleep(0.2)
+        time.sleep(0.5)  # Allow more time for subprocess startup on Windows
         assert client.is_alive()
 
         # Use home position - a known safe position
@@ -112,13 +112,13 @@ def test_ik_worker_all_enabled_in_safe_position():
         client.submit_request(q_home, T_matrix)
 
         result = None
-        for _ in range(50):
+        for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
             result = client.get_results_if_ready()
             if result is not None:
                 break
-            time.sleep(0.01)
+            time.sleep(0.02)
 
-        assert result is not None
+        assert result is not None, "IK worker did not return results in time"
         joint_en, cart_en_wrf, cart_en_trf = result
 
         # All joint directions should be enabled in true center position
