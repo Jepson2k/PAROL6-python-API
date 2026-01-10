@@ -52,7 +52,8 @@ dependencies = [
     "ruckig>=0.12.2",
     "toppra>=0.6.3",
     "interpolatepy>=2.0.0",
-    "sophuspy>=1.0.1",
+    "numpy>=2.0",
+    "sophuspy @ git+https://github.com/Jepson2k/SophusPy.git"
 ]
 
 [tool.setuptools.packages.find]
