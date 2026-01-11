@@ -122,6 +122,37 @@ def csv_floats(token: Any) -> list[float]:
     return [] if t is None else [float(x) for x in t.split(",") if x != ""]
 
 
+@dataclass
+class MotionParams:
+    """Common motion command parameters."""
+
+    duration: float | None = None
+    velocity_percent: float | None = None
+    accel_percent: float = 100.0
+
+
+def parse_motion_params(
+    parts: list[str], start_idx: int, default_accel: float = 100.0
+) -> MotionParams:
+    """Parse duration, velocity_percent, accel_percent from parts[start_idx:].
+
+    Expected order: duration, velocity_percent, accel_percent
+    All are optional (None/NONE/NULL tokens become None or default).
+    """
+    duration = parse_opt_float(parts[start_idx]) if start_idx < len(parts) else None
+    velocity = (
+        parse_opt_float(parts[start_idx + 1]) if start_idx + 1 < len(parts) else None
+    )
+    accel = (
+        parse_opt_float(parts[start_idx + 2], default_accel)
+        if start_idx + 2 < len(parts)
+        else default_accel
+    )
+    return MotionParams(
+        duration=duration, velocity_percent=velocity, accel_percent=accel
+    )
+
+
 def parse_bool(token: Any) -> bool:
     t = (str(token or "")).strip().lower()
     return t in ("1", "true", "yes", "on")
@@ -488,13 +519,9 @@ class TrajectoryMoveCommandBase(MotionCommand):
     """
     Base class for commands that execute pre-computed trajectories.
 
-    Subclasses pre-compute trajectory_steps in do_setup(), and this base class
-    handles direct tick-by-tick execution. Precomputed trajectories bypass
-    StreamingExecutor since they're already time-optimal (TOPPRA/RUCKIG) or
-    validated (QUINTIC/TRAPEZOID).
-
-    Subclasses may override execute_step() if they need special handling
-    (e.g., streaming mode support).
+    Subclasses pre-compute trajectory_steps in do_setup(). Velocity/acceleration
+    limits are enforced during trajectory building via local segment slowdown,
+    so execute_step() simply outputs waypoints tick-by-tick.
     """
 
     __slots__ = ("trajectory_steps", "command_step")
@@ -505,15 +532,16 @@ class TrajectoryMoveCommandBase(MotionCommand):
         self.command_step = 0
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
-        """Execute pre-computed trajectory directly (no streaming executor)."""
+        """Execute trajectory by outputting pre-computed waypoints."""
         if self.command_step >= len(self.trajectory_steps):
             self.log_info("%s finished.", self.__class__.__name__)
             self.is_finished = True
             self.stop_and_idle(state)
             return ExecutionStatus.completed(f"{self.__class__.__name__} complete")
 
-        # Output trajectory step directly
-        self.set_move_position(state, self.trajectory_steps[self.command_step])
+        target = self.trajectory_steps[self.command_step]
+        np.copyto(state.Position_out, target)
+        state.Command_out = CommandCode.MOVE
         self.command_step += 1
 
         return ExecutionStatus.executing(self.__class__.__name__)

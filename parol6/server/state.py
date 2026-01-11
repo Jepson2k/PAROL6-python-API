@@ -45,11 +45,9 @@ class ControllerState:
     e_stop_active: bool = False
     stream_mode: bool = False
 
-    # Motion profiles - separate for joint and Cartesian moves
-    # Joint: TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, SCURVE, LINEAR
-    # Cartesian: TOPPRA, LINEAR only
-    joint_motion_profile: str = "TOPPRA"
-    cartesian_motion_profile: str = "TOPPRA"
+    # Motion profile for all moves (TOPPRA, RUCKIG, QUINTIC, TRAPEZOID, LINEAR)
+    # Note: RUCKIG is point-to-point only; Cartesian moves fall back to TOPPRA
+    motion_profile: str = "TOPPRA"
 
     # Streaming executors for online motion (jogging/streaming)
     streaming_executor: "StreamingExecutor | None" = None  # Joint-space Ruckig
@@ -175,8 +173,7 @@ class ControllerState:
         self.disabled_reason = ""
         self.e_stop_active = False
         self.stream_mode = False
-        self.joint_motion_profile = "TOPPRA"
-        self.cartesian_motion_profile = "TOPPRA"
+        self.motion_profile = "TOPPRA"
 
         # Tool back to none
         self._current_tool = "NONE"

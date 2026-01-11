@@ -302,48 +302,27 @@ class RobotClient:
         """
         return _run(self._inner.set_tool(tool_name))
 
-    def set_joint_profile(self, profile: str) -> bool:
+    def set_profile(self, profile: str) -> bool:
         """
-        Set the motion profile for joint-space moves (MoveJoint, MovePose, JogJoint).
+        Set the motion profile for all moves.
 
         Args:
-            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'SCURVE', 'LINEAR')
+            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
+                Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
             True if successful
         """
-        return _run(self._inner.set_joint_profile(profile))
+        return _run(self._inner.set_profile(profile))
 
-    def get_joint_profile(self) -> str | None:
+    def get_profile(self) -> str | None:
         """
-        Get the current joint motion profile.
+        Get the current motion profile.
 
         Returns:
-            Current joint motion profile, or None on timeout.
+            Current motion profile, or None on timeout.
         """
-        return _run(self._inner.get_joint_profile())
-
-    def set_cartesian_profile(self, profile: str) -> bool:
-        """
-        Set the motion profile for Cartesian moves (MoveCart, Circle, Arc, Spline, JogCart).
-
-        Args:
-            profile: Motion profile type ('TOPPRA', 'LINEAR')
-                Note: RUCKIG, QUINTIC, TRAPEZOID, and SCURVE are not supported for Cartesian moves.
-
-        Returns:
-            True if successful
-        """
-        return _run(self._inner.set_cartesian_profile(profile))
-
-    def get_cartesian_profile(self) -> str | None:
-        """
-        Get the current Cartesian motion profile.
-
-        Returns:
-            Current Cartesian motion profile, or None on timeout.
-        """
-        return _run(self._inner.get_cartesian_profile())
+        return _run(self._inner.get_profile())
 
     def get_current_action(self) -> dict | None:
         """
@@ -810,9 +789,9 @@ class RobotClient:
         plane: Literal["XY", "XZ", "YZ"] = "XY",
         frame: Literal["WRF", "TRF"] = "WRF",
         center_mode: Literal["ABSOLUTE", "TOOL", "RELATIVE"] = "ABSOLUTE",
-        entry_mode: Literal["AUTO", "TANGENT", "DIRECT", "NONE"] = "NONE",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
@@ -827,9 +806,9 @@ class RobotClient:
             plane: Plane of the circle ('XY', 'XZ', 'YZ').
             frame: Reference frame ('WRF' or 'TRF').
             center_mode: How to interpret center point.
-            entry_mode: How to approach circle if not on perimeter.
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
+            duration: Time to complete motion in seconds (overrides velocity).
+            velocity_percent: Speed as percentage (1-100), ignored if duration set.
+            accel_percent: Acceleration as percentage (1-100).
             clockwise: Direction of motion.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
@@ -844,9 +823,9 @@ class RobotClient:
                 plane=plane,
                 frame=frame,
                 center_mode=center_mode,
-                entry_mode=entry_mode,
                 duration=duration,
-                speed=speed,
+                velocity_percent=velocity_percent,
+                accel_percent=accel_percent,
                 clockwise=clockwise,
                 wait=wait,
                 **wait_kwargs,
@@ -859,7 +838,8 @@ class RobotClient:
         center: list[float],
         frame: Literal["WRF", "TRF"] = "WRF",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
@@ -872,8 +852,9 @@ class RobotClient:
             end_pose: End pose [x, y, z, rx, ry, rz] in mm and degrees.
             center: Arc center [x, y, z] in mm.
             frame: Reference frame ('WRF' or 'TRF').
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
+            duration: Time to complete motion in seconds (overrides velocity).
+            velocity_percent: Speed as percentage (1-100), ignored if duration set.
+            accel_percent: Acceleration as percentage (1-100).
             clockwise: Direction of motion.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
@@ -887,7 +868,8 @@ class RobotClient:
                 center=center,
                 frame=frame,
                 duration=duration,
-                speed=speed,
+                velocity_percent=velocity_percent,
+                accel_percent=accel_percent,
                 clockwise=clockwise,
                 wait=wait,
                 **wait_kwargs,
@@ -901,7 +883,8 @@ class RobotClient:
         arc_angle: float,
         frame: Literal["WRF", "TRF"] = "WRF",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
@@ -915,8 +898,9 @@ class RobotClient:
             radius: Arc radius in mm.
             arc_angle: Arc angle in degrees.
             frame: Reference frame ('WRF' or 'TRF').
-            duration: Time to complete motion in seconds.
-            speed: Speed as percentage (1-100).
+            duration: Time to complete motion in seconds (overrides velocity).
+            velocity_percent: Speed as percentage (1-100), ignored if duration set.
+            accel_percent: Acceleration as percentage (1-100).
             clockwise: Direction of motion.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
@@ -931,7 +915,8 @@ class RobotClient:
                 arc_angle=arc_angle,
                 frame=frame,
                 duration=duration,
-                speed=speed,
+                velocity_percent=velocity_percent,
+                accel_percent=accel_percent,
                 clockwise=clockwise,
                 wait=wait,
                 **wait_kwargs,
@@ -943,7 +928,8 @@ class RobotClient:
         waypoints: list[list[float]],
         frame: Literal["WRF", "TRF"] = "WRF",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
@@ -954,8 +940,9 @@ class RobotClient:
         Args:
             waypoints: List of poses [x, y, z, rx, ry, rz] in mm and degrees.
             frame: Reference frame ('WRF' or 'TRF').
-            duration: Total time for motion in seconds.
-            speed: Speed as percentage (1-100).
+            duration: Total time for motion in seconds (overrides velocity).
+            velocity_percent: Speed as percentage (1-100), ignored if duration set.
+            accel_percent: Acceleration as percentage (1-100).
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -967,7 +954,8 @@ class RobotClient:
                 waypoints=waypoints,
                 frame=frame,
                 duration=duration,
-                speed=speed,
+                velocity_percent=velocity_percent,
+                accel_percent=accel_percent,
                 wait=wait,
                 **wait_kwargs,
             )

@@ -567,54 +567,27 @@ class AsyncRobotClient:
         """
         return await self._send(f"SET_TOOL|{tool_name.upper()}")
 
-    async def set_joint_profile(self, profile: str) -> bool:
+    async def set_profile(self, profile: str) -> bool:
         """
-        Set the motion profile for joint-space moves (MoveJoint, MovePose, JogJoint).
+        Set the motion profile for all moves.
 
         Args:
-            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'SCURVE', 'LINEAR')
+            profile: Motion profile type ('TOPPRA', 'RUCKIG', 'QUINTIC', 'TRAPEZOID', 'LINEAR')
+                Note: RUCKIG is point-to-point only; Cartesian moves will use TOPPRA.
 
         Returns:
             True if successful
         """
-        return await self._send(f"SETJOINTPROFILE|{profile.upper()}")
+        return await self._send(f"SETPROFILE|{profile.upper()}")
 
-    async def get_joint_profile(self) -> str | None:
+    async def get_profile(self) -> str | None:
         """
-        Get the current joint motion profile.
+        Get the current motion profile.
 
         Returns:
-            Current joint motion profile, or None on timeout.
+            Current motion profile, or None on timeout.
         """
-        resp = await self._request("GETJOINTPROFILE", bufsize=256)
-        if not resp:
-            return None
-        parts = resp.split("|")
-        if len(parts) >= 2:
-            return parts[1].upper()
-        return resp.strip().upper()
-
-    async def set_cartesian_profile(self, profile: str) -> bool:
-        """
-        Set the motion profile for Cartesian moves (MoveCart, Circle, Arc, Spline, JogCart).
-
-        Args:
-            profile: Motion profile type ('TOPPRA', 'LINEAR')
-                Note: RUCKIG, QUINTIC, TRAPEZOID, and SCURVE are not supported for Cartesian moves.
-
-        Returns:
-            True if successful
-        """
-        return await self._send(f"SETCARTPROFILE|{profile.upper()}")
-
-    async def get_cartesian_profile(self) -> str | None:
-        """
-        Get the current Cartesian motion profile.
-
-        Returns:
-            Current Cartesian motion profile, or None on timeout.
-        """
-        resp = await self._request("GETCARTPROFILE", bufsize=256)
+        resp = await self._request("GETPROFILE", bufsize=256)
         if not resp:
             return None
         parts = resp.split("|")
@@ -1245,9 +1218,9 @@ class AsyncRobotClient:
         plane: Literal["XY", "XZ", "YZ"] = "XY",
         frame: Literal["WRF", "TRF"] = "WRF",
         center_mode: Literal["ABSOLUTE", "TOOL", "RELATIVE"] = "ABSOLUTE",
-        entry_mode: Literal["AUTO", "TANGENT", "DIRECT", "NONE"] = "NONE",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
@@ -1262,31 +1235,31 @@ class AsyncRobotClient:
             plane: Plane of the circle ('XY', 'XZ', or 'YZ')
             frame: Reference frame ('WRF' for World, 'TRF' for Tool)
             center_mode: How to interpret center point
-            entry_mode: How to approach circle if not on perimeter
-            duration: Time to complete the circle in seconds
-            speed: Speed as percentage (1-100)
+            duration: Time to complete the circle in seconds (overrides velocity)
+            velocity_percent: Speed as percentage (1-100), ignored if duration set
+            accel_percent: Acceleration as percentage (1-100)
             clockwise: Direction of motion
             wait: If True, block until motion completes
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
-        if duration is None and speed is None:
-            raise RuntimeError("Error: You must provide either duration or speed.")
         center_str = ",".join(map(str, center))
-        clockwise_str = "CW" if clockwise else ""
-        timing_str = (
-            f"DURATION|{duration}" if duration is not None else f"SPEED|{speed}"
-        )
+        # Format: duration|velocity|accel (all optional)
+        dur_str = str(duration) if duration is not None else ""
+        vel_str = str(velocity_percent) if velocity_percent is not None else ""
+        acc_str = str(accel_percent) if accel_percent is not None else ""
         parts = [
             "SMOOTH_CIRCLE",
             center_str,
             str(radius),
             plane,
             frame,
-            timing_str,
+            dur_str,
+            vel_str,
+            acc_str,
         ]
-        if clockwise_str:
-            parts.append(clockwise_str)
-        parts.extend([center_mode, entry_mode])
+        if clockwise:
+            parts.append("CW")
+        parts.append(center_mode)
         command = "|".join(parts)
         result = await self._send(command)
         if wait and result:
@@ -1299,7 +1272,8 @@ class AsyncRobotClient:
         center: list[float],
         frame: Literal["WRF", "TRF"] = "WRF",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
@@ -1312,25 +1286,27 @@ class AsyncRobotClient:
             end_pose: [x, y, z, rx, ry, rz] end pose (mm and degrees)
             center: [x, y, z] arc center point in mm
             frame: Reference frame ('WRF' for World, 'TRF' for Tool)
-            duration: Time to complete the arc in seconds
-            speed: Speed as percentage (1-100)
+            duration: Time to complete the arc in seconds (overrides velocity)
+            velocity_percent: Speed as percentage (1-100), ignored if duration set
+            accel_percent: Acceleration as percentage (1-100)
             clockwise: Direction of motion
             wait: If True, block until motion completes
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
-        if duration is None and speed is None:
-            raise RuntimeError("Error: You must provide either a duration or a speed.")
         end_str = ",".join(map(str, end_pose))
         center_str = ",".join(map(str, center))
-        timing_str = (
-            f"DURATION|{duration}" if duration is not None else f"SPEED|{speed}"
-        )
+        # Format: duration|velocity|accel (all optional)
+        dur_str = str(duration) if duration is not None else ""
+        vel_str = str(velocity_percent) if velocity_percent is not None else ""
+        acc_str = str(accel_percent) if accel_percent is not None else ""
         parts = [
             "SMOOTH_ARC_CENTER",
             end_str,
             center_str,
             frame,
-            timing_str,
+            dur_str,
+            vel_str,
+            acc_str,
         ]
         if clockwise:
             parts.append("CW")
@@ -1347,7 +1323,8 @@ class AsyncRobotClient:
         arc_angle: float,
         frame: Literal["WRF", "TRF"] = "WRF",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         clockwise: bool = False,
         wait: bool = False,
         **wait_kwargs,
@@ -1361,25 +1338,27 @@ class AsyncRobotClient:
             radius: Arc radius in mm
             arc_angle: Arc angle in degrees
             frame: Reference frame ('WRF' for World, 'TRF' for Tool)
-            duration: Time to complete the arc in seconds
-            speed: Speed as percentage (1-100)
+            duration: Time to complete the arc in seconds (overrides velocity)
+            velocity_percent: Speed as percentage (1-100), ignored if duration set
+            accel_percent: Acceleration as percentage (1-100)
             clockwise: Direction of motion
             wait: If True, block until motion completes
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
-        if duration is None and speed is None:
-            raise RuntimeError("You must provide either a duration or a speed.")
         end_str = ",".join(map(str, end_pose))
-        timing_str = (
-            f"DURATION|{duration}" if duration is not None else f"SPEED|{speed}"
-        )
+        # Format: duration|velocity|accel (all optional)
+        dur_str = str(duration) if duration is not None else ""
+        vel_str = str(velocity_percent) if velocity_percent is not None else ""
+        acc_str = str(accel_percent) if accel_percent is not None else ""
         parts = [
             "SMOOTH_ARC_PARAM",
             end_str,
             str(radius),
             str(arc_angle),
             frame,
-            timing_str,
+            dur_str,
+            vel_str,
+            acc_str,
         ]
         if clockwise:
             parts.append("CW")
@@ -1393,7 +1372,8 @@ class AsyncRobotClient:
         waypoints: list[list[float]],
         frame: Literal["WRF", "TRF"] = "WRF",
         duration: float | None = None,
-        speed: float | None = None,
+        velocity_percent: float | None = None,
+        accel_percent: float | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
@@ -1404,16 +1384,17 @@ class AsyncRobotClient:
         Args:
             waypoints: List of [x, y, z, rx, ry, rz] poses (mm and degrees)
             frame: Reference frame ('WRF' for World, 'TRF' for Tool)
-            duration: Total time for the motion in seconds
-            speed: Speed as percentage (1-100)
+            duration: Total time for the motion in seconds (overrides velocity)
+            velocity_percent: Speed as percentage (1-100), ignored if duration set
+            accel_percent: Acceleration as percentage (1-100)
             wait: If True, block until motion completes
             **wait_kwargs: Arguments passed to wait_motion_complete()
         """
-        if duration is None and speed is None:
-            raise RuntimeError("Error: You must provide either duration or speed.")
         num_waypoints = len(waypoints)
-        timing_type = "DURATION" if duration is not None else "SPEED"
-        timing_value = duration if duration is not None else speed
+        # Format: count|frame|duration|velocity|accel|flattened_waypoints...
+        dur_str = str(duration) if duration is not None else ""
+        vel_str = str(velocity_percent) if velocity_percent is not None else ""
+        acc_str = str(accel_percent) if accel_percent is not None else ""
         waypoint_strs: list[str] = []
         for wp in waypoints:
             waypoint_strs.extend(map(str, wp))
@@ -1421,8 +1402,9 @@ class AsyncRobotClient:
             "SMOOTH_SPLINE",
             str(num_waypoints),
             frame,
-            timing_type,
-            str(timing_value),
+            dur_str,
+            vel_str,
+            acc_str,
             *waypoint_strs,
         ]
         result = await self._send("|".join(parts))

@@ -47,7 +47,6 @@ class ProfileType(Enum):
     RUCKIG = "ruckig"  # Point-to-point jerk-limited (can't follow Cartesian paths)
     QUINTIC = "quintic"  # Quintic polynomial (C² smooth, predictable shape)
     TRAPEZOID = "trapezoid"  # Trapezoidal velocity profile
-    SCURVE = "scurve"  # S-curve (jerk-limited) velocity profile
     LINEAR = "linear"  # Direct linear interpolation (no smoothing)
 
     @classmethod
@@ -301,6 +300,14 @@ class TrajectoryBuilder:
         self.profile = (
             ProfileType.from_string(profile) if isinstance(profile, str) else profile
         )
+
+        # RUCKIG is point-to-point only - if Cartesian limits are set, we need path following
+        if self.profile == ProfileType.RUCKIG and (
+            cart_vel_limit is not None or cart_acc_limit is not None
+        ):
+            logger.warning("RUCKIG cannot follow Cartesian paths, using TOPPRA")
+            self.profile = ProfileType.TOPPRA
+
         self.velocity_percent = (
             velocity_percent if velocity_percent is not None else 100.0
         )
@@ -311,10 +318,17 @@ class TrajectoryBuilder:
         self.cart_vel_limit = cart_vel_limit
         self.cart_acc_limit = cart_acc_limit
 
-        # Joint limits at full (hard upper bounds) - from centralized config
-        self.v_max = LIMITS.joint.hard.velocity * (self.velocity_percent / 100.0)
-        self.a_max = LIMITS.joint.hard.acceleration * (self.accel_percent / 100.0)
-        self.j_max = LIMITS.joint.hard.jerk * (self.jerk_percent / 100.0)
+        # Joint limits scaled by user percentages.
+        # Apply 1% safety margin to account for floating-point precision in
+        # trajectory libraries and integer rounding in rad→steps conversion.
+        limit_margin = 0.99
+        self.v_max = (
+            LIMITS.joint.hard.velocity * (self.velocity_percent / 100.0) * limit_margin
+        )
+        self.a_max = (
+            LIMITS.joint.hard.acceleration * (self.accel_percent / 100.0) * limit_margin
+        )
+        self.j_max = LIMITS.joint.hard.jerk * (self.jerk_percent / 100.0) * limit_margin
 
         # Pre-compute limit arrays for TOPP-RA (avoids allocation per build() call)
         self._vlim = np.column_stack([-self.v_max, self.v_max])
@@ -355,9 +369,6 @@ class TrajectoryBuilder:
         elif self.profile == ProfileType.TRAPEZOID:
             # Trapezoidal velocity profile along path
             return self._build_trapezoid_trajectory()
-        elif self.profile == ProfileType.SCURVE:
-            # S-curve (jerk-limited) velocity profile along path
-            return self._build_scurve_trajectory()
         else:
             # TOPPRA is default - time-optimal path following
             return self._build_toppra_trajectory()
@@ -448,107 +459,169 @@ class TrajectoryBuilder:
             return Trajectory(steps=steps, duration=duration)
 
         except Exception as e:
-            logger.warning("TOPP-RA error: %s. Using fallback.", e)
+            logger.warning("TOPPRA failed: %s. Falling back to LINEAR profile.", e)
             return self._build_simple_trajectory()
 
     def _build_simple_trajectory(self) -> Trajectory:
         """
         Build trajectory with simple linear interpolation.
 
-        Iteratively extends duration if joint velocity/acceleration limits
-        are violated, using the same approach as QUINTIC/TRAPEZOID/SCURVE.
+        Uses uniform s-spacing with local slowdown where velocity limits
+        would be exceeded. This handles singularities and wrist flips by
+        stretching only the affected segments.
         """
-        user_duration = self.duration if self.duration and self.duration > 0 else None
-        if user_duration:
-            duration = user_duration
-        else:
-            duration = self._estimate_simple_duration()
+        duration = (
+            self.duration
+            if self.duration and self.duration > 0
+            else self._compute_joint_duration_linear()
+        )
 
-        max_iterations = 10
-        for iteration in range(max_iterations):
-            n_output = max(2, int(np.ceil(duration / self.dt)))
+        # Sample path uniformly
+        n_output = max(2, int(np.ceil(duration / self.dt)))
+        s_values = np.linspace(0.0, 1.0, n_output)
+        trajectory_rad = self.joint_path.sample_many(s_values)
 
-            # Vectorized path sampling
-            s_values = np.linspace(0.0, 1.0, n_output)
-            trajectory_rad = self.joint_path.sample_many(s_values)
+        # Enforce velocity limits by stretching segments where needed
+        trajectory_rad, duration = self._enforce_segment_limits(
+            trajectory_rad, duration
+        )
 
-            # Check if joint limits are satisfied
-            slowdown = self._compute_slowdown_factor(trajectory_rad, duration)
-            if slowdown <= 1.0:
-                break
-
-            # Extend duration and retry
-            new_duration = duration * slowdown * 1.05  # 5% margin
-            if user_duration:
-                logger.warning(
-                    "LINEAR: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration,
-                    new_duration,
-                )
-            duration = new_duration
-        else:
-            raise ValueError(
-                f"LINEAR: Could not satisfy joint limits after {max_iterations} iterations. "
-                f"Path may be too aggressive for current joint limits."
-            )
-
-        # Convert to motor steps (vectorized)
+        # Convert to motor steps
         steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
 
         return Trajectory(steps=steps, duration=duration)
 
-    def _compute_slowdown_factor(
-        self,
-        trajectory_rad: NDArray[np.float64],
-        duration: float,
-    ) -> float:
-        """
-        Compute slowdown factor needed to bring trajectory within joint limits.
-
-        Returns 1.0 if trajectory is valid, >1.0 if it needs to be slower.
-
-        Args:
-            trajectory_rad: (N, 6) joint positions in radians at each sample
-            duration: Total trajectory duration in seconds
-
-        Returns:
-            Slowdown factor (multiply duration by this to fix violations)
-        """
-        n_samples = len(trajectory_rad)
-        if n_samples < 2:
-            return 1.0
-
-        # Actual time spacing between samples
-        actual_dt = duration / (n_samples - 1)
-
-        slowdown = 1.0
-
-        # Compute velocities via finite difference using actual sample spacing
-        velocities = np.diff(trajectory_rad, axis=0) / actual_dt
-        max_vel = np.max(np.abs(velocities), axis=0)
-
-        # Check velocity limits - slowdown is linear with velocity
-        vel_ratios = max_vel / self.v_max
-        max_vel_ratio = float(np.max(vel_ratios))
-        if max_vel_ratio > 1.0:
-            slowdown = max(slowdown, max_vel_ratio)
-
-        # Compute accelerations via finite difference
-        if len(velocities) > 1:
-            accelerations = np.diff(velocities, axis=0) / actual_dt
-            max_acc = np.max(np.abs(accelerations), axis=0)
-
-            # Acceleration scales with 1/t², so slowdown factor is sqrt
-            acc_ratios = max_acc / self.a_max
-            max_acc_ratio = float(np.max(acc_ratios))
-            if max_acc_ratio > 1.0:
-                slowdown = max(slowdown, np.sqrt(max_acc_ratio))
-
-        return slowdown
-
     def _is_cartesian_path(self) -> bool:
         """Check if this is a Cartesian path (has Cartesian velocity limits set)."""
         return self.cart_vel_limit is not None and self.cart_vel_limit > 0
+
+    def _compute_s_profile_limits(self) -> tuple[float, float, float]:
+        """
+        Compute path parameter (s) limits derived from joint limits.
+
+        For a linear path in joint space:
+            joint_velocity = joint_delta * (ds/dt)
+            joint_acceleration = joint_delta * (d²s/dt²)
+            joint_jerk = joint_delta * (d³s/dt³)
+
+        So the s-profile limits are:
+            vmax_s = min(v_max[j] / |delta[j]|) for all joints
+            amax_s = min(a_max[j] / |delta[j]|) for all joints
+            jmax_s = min(j_max[j] / |delta[j]|) for all joints
+
+        Returns:
+            (vmax_s, amax_s, jmax_s): Limits for the path parameter profile
+        """
+        positions = self.joint_path.positions
+        if len(positions) < 2:
+            return (1.0, 1.0, 1.0)
+
+        total_delta = np.abs(positions[-1] - positions[0])
+
+        # Avoid division by zero for joints that don't move
+        with np.errstate(divide="ignore", invalid="ignore"):
+            vmax_s_per_joint = np.where(
+                total_delta > 1e-9, self.v_max / total_delta, np.inf
+            )
+            amax_s_per_joint = np.where(
+                total_delta > 1e-9, self.a_max / total_delta, np.inf
+            )
+            jmax_s_per_joint = np.where(
+                total_delta > 1e-9, self.j_max / total_delta, np.inf
+            )
+
+        # The limiting joint determines the s-profile limits
+        vmax_s = float(np.min(vmax_s_per_joint))
+        amax_s = float(np.min(amax_s_per_joint))
+        jmax_s = float(np.min(jmax_s_per_joint))
+
+        return (vmax_s, amax_s, jmax_s)
+
+    def _enforce_segment_limits(
+        self,
+        trajectory_rad: NDArray[np.float64],
+        duration: float,
+    ) -> tuple[NDArray[np.float64], float]:
+        """
+        Enforce velocity limits by locally stretching segments that exceed limits.
+
+        Walks through each segment and checks if joint velocities exceed limits.
+        Where they do, stretches that segment's time. This handles singularities
+        and wrist flips by slowing only where necessary, not globally.
+
+        Args:
+            trajectory_rad: Joint positions in radians, shape (N, 6)
+            duration: Initial trajectory duration
+
+        Returns:
+            (adjusted_trajectory, adjusted_duration): Resampled trajectory with
+            locally stretched segments and new total duration
+        """
+        n_points = len(trajectory_rad)
+        if n_points < 2:
+            return trajectory_rad, duration
+
+        # Initial uniform time per segment
+        initial_dt = duration / (n_points - 1)
+
+        # Compute per-segment joint deltas
+        deltas = np.diff(trajectory_rad, axis=0)  # (N-1, 6)
+
+        # For each segment, compute minimum time needed to respect velocity limits
+        # time_needed = max(|delta[j]| / v_max[j]) for all joints
+        min_segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
+
+        # Also check acceleration limits between segments
+        # This is approximate - we check if velocity change between segments is feasible
+        if n_points > 2:
+            velocities = deltas / initial_dt  # Approximate velocities per segment
+            accel = np.diff(velocities, axis=0) / initial_dt  # (N-2, 6)
+            accel_times = np.zeros(n_points - 1)
+            # Segments that cause high acceleration need more time
+            for i in range(len(accel)):
+                max_accel_ratio = np.max(np.abs(accel[i]) / self.a_max)
+                if max_accel_ratio > 1.0:
+                    # Spread the extra time across adjacent segments
+                    stretch = np.sqrt(max_accel_ratio)
+                    accel_times[i] = max(accel_times[i], min_segment_times[i] * stretch)
+                    accel_times[i + 1] = max(
+                        accel_times[i + 1], min_segment_times[i + 1] * stretch
+                    )
+            min_segment_times = np.maximum(min_segment_times, accel_times)
+
+        # Ensure minimum dt per segment
+        min_segment_times = np.maximum(min_segment_times, self.dt)
+
+        # Compute actual segment times: max of initial_dt and min_segment_times
+        segment_times = np.maximum(min_segment_times, initial_dt)
+
+        # Check if any stretching was needed
+        new_duration = float(np.sum(segment_times))
+        if new_duration <= duration * 1.001:  # No significant change
+            return trajectory_rad, duration
+
+        logger.warning(
+            "Extending duration from %.3fs to %.3fs (%.1f%% increase) to respect velocity/acceleration limits",
+            duration,
+            new_duration,
+            (new_duration / duration - 1) * 100,
+        )
+
+        # Resample trajectory at control rate with new timing
+        cumulative_times = np.zeros(n_points)
+        cumulative_times[1:] = np.cumsum(segment_times)
+
+        n_output = max(2, int(np.ceil(new_duration / self.dt)))
+        output_times = np.linspace(0.0, new_duration, n_output)
+
+        # Interpolate each joint
+        new_trajectory = np.empty((n_output, 6), dtype=np.float64)
+        for j in range(6):
+            new_trajectory[:, j] = np.interp(
+                output_times, cumulative_times, trajectory_rad[:, j]
+            )
+
+        return new_trajectory, new_duration
 
     def _compute_joint_duration_trapezoid(self) -> float:
         """
@@ -588,129 +661,197 @@ class TrajectoryBuilder:
 
         return max(max_duration, self.dt * 2)
 
-    def _compute_joint_duration_scurve(self) -> float:
+    def _compute_joint_duration_quintic(self) -> float:
         """
-        Compute duration for joint paths using S-curve profile.
+        Compute duration for joint paths using quintic polynomial profile.
 
-        For each joint, uses InterpolatePy's DoubleSTrajectory to compute
-        the minimum duration given velocity/acceleration/jerk limits.
-        Returns the maximum (slowest joint determines overall duration).
+        For quintic polynomials with zero-velocity endpoints:
+        - Peak velocity at t=T/2: v_peak = 1.875 * delta / T
+        - Peak acceleration at t=T*(3-sqrt(3))/6: a_peak = 5.77 * delta / T²
+
+        For velocity limit: T = 1.875 * delta / v_max
+        For acceleration limit: T = sqrt(5.77 * delta / a_max)
+
+        Returns the maximum duration across all joints.
         """
-        from interpolatepy import DoubleSTrajectory, StateParams, TrajectoryBounds
-
         positions = self.joint_path.positions
         if len(positions) < 2:
             return self.dt * 2
 
-        total_delta = positions[-1] - positions[0]
-        max_duration = 0.0
+        total_delta = np.abs(positions[-1] - positions[0])
 
-        for j in range(6):
-            delta = abs(total_delta[j])
-            if delta < 1e-6:
-                continue
+        # Velocity-limited duration: T = 1.875 * delta / v_max
+        time_vel = 1.875 * total_delta / self.v_max
 
-            state = StateParams(q_0=0.0, q_1=delta, v_0=0.0, v_1=0.0)
-            bounds = TrajectoryBounds(
-                v_bound=self.v_max[j],
-                a_bound=self.a_max[j],
-                j_bound=self.j_max[j],
+        # Acceleration-limited duration: T = sqrt(5.77 * delta / a_max)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            time_acc = np.where(
+                self.a_max > 0,
+                np.sqrt(5.77 * total_delta / self.a_max),
+                0.0,
             )
-            traj = DoubleSTrajectory(state, bounds)
-            max_duration = max(max_duration, traj.get_duration())
 
-        return max(max_duration, self.dt * 2)
+        # Take the maximum per joint, then across all joints
+        time_per_joint = np.maximum(time_vel, time_acc)
+        return max(float(np.max(time_per_joint)), self.dt * 2)
 
-    def _compute_cartesian_duration_trapezoid(self) -> float:
-        """Compute duration for Cartesian paths using trapezoidal profile."""
-        from interpolatepy.trapezoidal import (
-            TrajectoryParams as TrapParams,
-            TrapezoidalTrajectory,
-        )
+    def _compute_joint_duration_linear(self) -> float:
+        """
+        Compute duration for joint paths using linear interpolation.
 
-        v_max = self.cart_vel_limit if self.cart_vel_limit else 0.1
-        a_max = self.cart_acc_limit if self.cart_acc_limit else v_max * 2
+        Accounts for both velocity and acceleration limits:
+        - For velocity limit: T_vel = delta / v_max
+        - For acceleration limit (triangular profile): T_acc = 2 * sqrt(2 * delta / a_max)
 
-        # Profile for unit path (s: 0 to 1)
-        params = TrapParams(q0=0.0, q1=1.0, v0=0.0, v1=0.0, vmax=v_max, amax=a_max)
-        _, duration = TrapezoidalTrajectory.generate_trajectory(params)
-        return duration
+        Returns the maximum duration across all joints.
+        """
+        positions = self.joint_path.positions
+        if len(positions) < 2:
+            return self.dt * 2
 
-    def _compute_cartesian_duration_scurve(self) -> float:
-        """Compute duration for Cartesian paths using S-curve profile."""
-        from interpolatepy import DoubleSTrajectory, StateParams, TrajectoryBounds
+        total_delta = np.abs(positions[-1] - positions[0])
 
-        v_max = self.cart_vel_limit if self.cart_vel_limit else 0.1
-        a_max = self.cart_acc_limit if self.cart_acc_limit else v_max * 2
-        j_max = a_max * 4  # Conservative jerk for Cartesian
+        # Velocity-limited duration
+        time_vel = total_delta / self.v_max
 
-        state = StateParams(q_0=0.0, q_1=1.0, v_0=0.0, v_1=0.0)
-        bounds = TrajectoryBounds(v_bound=v_max, a_bound=a_max, j_bound=j_max)
-        traj = DoubleSTrajectory(state, bounds)
-        return traj.get_duration()
+        # Acceleration-limited duration (for triangular velocity profile)
+        # Time to reach target with constant accel then decel: T = 2 * sqrt(2 * d / a)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            time_acc = np.where(
+                self.a_max > 0,
+                2.0 * np.sqrt(2.0 * total_delta / self.a_max),
+                0.0,
+            )
+
+        # Take the maximum per joint, then across all joints
+        time_per_joint = np.maximum(time_vel, time_acc)
+        return max(float(np.max(time_per_joint)), self.dt * 2)
+
+    def _compute_cartesian_duration_from_path(self) -> float:
+        """
+        Compute duration for Cartesian paths based on per-segment joint requirements.
+
+        This properly handles singularities and wrist flips by analyzing
+        the maximum joint movement required in each path segment, not just
+        the total start-to-end displacement.
+
+        Returns the sum of minimum segment times, ensuring the path can be
+        traversed without violating joint velocity limits at any point.
+        """
+        positions = self.joint_path.positions
+        if len(positions) < 2:
+            return self.dt * 2
+
+        # Compute per-segment time based on max joint movement in each segment
+        deltas = np.diff(positions, axis=0)  # (N-1, 6)
+        segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
+
+        # Ensure minimum time per segment
+        segment_times = np.maximum(segment_times, self.dt)
+
+        return max(float(np.sum(segment_times)), self.dt * 2)
 
     def _build_quintic_trajectory(self) -> Trajectory:
         """
         Build trajectory with quintic polynomial velocity profile.
 
-        For Cartesian paths: falls back to TOPPRA since simple profiles can't
-        handle the non-uniform joint movements from IK (especially near singularities).
-        For Joint paths: computes per-joint durations, uses slowest joint's timing.
+        For joint moves: each joint follows its own quintic profile.
+        For Cartesian moves: TCP follows quintic profile along path.
+        """
+        if self._is_cartesian_path():
+            return self._build_quintic_trajectory_cartesian()
+        else:
+            return self._build_quintic_trajectory_joint()
 
-        Uses InterpolatePy's order-5 polynomial which provides zero velocity
-        and acceleration at endpoints (C² smooth).
+    def _build_quintic_trajectory_joint(self) -> Trajectory:
+        """
+        Build per-joint quintic trajectory.
 
-        Iteratively extends duration if joint limits are violated.
+        Each joint independently follows a quintic polynomial profile,
+        synchronized to finish at the same time.
         """
         from interpolatepy import BoundaryCondition, PolynomialTrajectory, TimeInterval
 
-        # For Cartesian paths, fall back to TOPPRA - simple profiles can't handle
-        # the non-uniform joint movements from IK (especially near singularities)
-        if self._is_cartesian_path():
-            logger.debug("QUINTIC: Falling back to TOPPRA for Cartesian path")
-            return self._build_toppra_trajectory()
+        start_pos = self.joint_path.positions[0]
+        end_pos = self.joint_path.positions[-1]
 
-        # Compute initial duration for joint paths
         user_duration = self.duration if self.duration and self.duration > 0 else None
         if user_duration:
             duration = user_duration
         else:
-            duration = self._compute_joint_duration_trapezoid()
+            duration = self._compute_joint_duration_quintic()
 
-        max_iterations = 10
-        for iteration in range(max_iterations):
-            # Create quintic trajectory from s=0 to s=1 over duration
-            bc_start = BoundaryCondition(position=0.0, velocity=0.0, acceleration=0.0)
-            bc_end = BoundaryCondition(position=1.0, velocity=0.0, acceleration=0.0)
+        n_output = max(2, int(np.ceil(duration / self.dt)))
+        times = np.linspace(0.0, duration, n_output)
+        trajectory_rad = np.empty((n_output, 6), dtype=np.float64)
+
+        # Generate quintic profile for each joint
+        for j in range(6):
+            delta = end_pos[j] - start_pos[j]
+            if abs(delta) < 1e-9:
+                # Joint doesn't move
+                trajectory_rad[:, j] = start_pos[j]
+                continue
+
+            # Create quintic trajectory for this joint
+            bc_start = BoundaryCondition(
+                position=start_pos[j], velocity=0.0, acceleration=0.0
+            )
+            bc_end = BoundaryCondition(
+                position=end_pos[j], velocity=0.0, acceleration=0.0
+            )
             interval = TimeInterval(start=0.0, end=duration)
             traj = PolynomialTrajectory.order_5_trajectory(bc_start, bc_end, interval)
 
-            n_output = max(2, int(np.ceil(duration / self.dt)))
-            times = np.linspace(0.0, duration, n_output)
+            # Sample the trajectory
+            for i, t in enumerate(times):
+                trajectory_rad[i, j] = traj(t)[0]
 
-            # Evaluate trajectory - returns (pos, vel, acc, jerk), we only need position
-            s_values = np.array([traj(t)[0] for t in times], dtype=np.float64)
-            trajectory_rad = self.joint_path.sample_many(s_values)
+        # Enforce velocity limits by stretching segments where needed
+        trajectory_rad, duration = self._enforce_segment_limits(
+            trajectory_rad, duration
+        )
 
-            # Check if joint limits are satisfied
-            slowdown = self._compute_slowdown_factor(trajectory_rad, duration)
-            if slowdown <= 1.0:
-                break
+        # Convert to motor steps
+        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
 
-            # Extend duration and retry
-            new_duration = duration * slowdown * 1.05  # 5% extra margin
-            if user_duration:
-                logger.warning(
-                    "QUINTIC: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration,
-                    new_duration,
-                )
-            duration = new_duration
+        return Trajectory(steps=steps, duration=duration)
+
+    def _build_quintic_trajectory_cartesian(self) -> Trajectory:
+        """
+        Build Cartesian quintic trajectory.
+
+        TCP follows quintic polynomial profile along the path, with local
+        slowdown where velocity limits would be exceeded.
+        """
+        from interpolatepy import BoundaryCondition, PolynomialTrajectory, TimeInterval
+
+        user_duration = self.duration if self.duration and self.duration > 0 else None
+        if user_duration:
+            duration = user_duration
         else:
-            raise ValueError(
-                f"QUINTIC: Could not satisfy joint limits after {max_iterations} iterations. "
-                f"Path may be too aggressive for current joint limits."
-            )
+            # Use per-segment analysis to handle singularities and wrist flips
+            duration = self._compute_cartesian_duration_from_path()
+
+        # Create quintic trajectory from s=0 to s=1 over duration
+        bc_start = BoundaryCondition(position=0.0, velocity=0.0, acceleration=0.0)
+        bc_end = BoundaryCondition(position=1.0, velocity=0.0, acceleration=0.0)
+        interval = TimeInterval(start=0.0, end=duration)
+        traj = PolynomialTrajectory.order_5_trajectory(bc_start, bc_end, interval)
+
+        n_output = max(2, int(np.ceil(duration / self.dt)))
+        times = np.linspace(0.0, duration, n_output)
+
+        # Evaluate quintic trajectory to get profile-shaped s values
+        profile_s = np.array([traj(t)[0] for t in times], dtype=np.float64)
+
+        # Sample path at quintic-shaped s values
+        trajectory_rad = self.joint_path.sample_many(profile_s)
+
+        # Enforce velocity limits by stretching segments where needed
+        trajectory_rad, duration = self._enforce_segment_limits(
+            trajectory_rad, duration
+        )
 
         # Convert to motor steps
         steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
@@ -721,153 +862,134 @@ class TrajectoryBuilder:
         """
         Build trajectory with trapezoidal velocity profile.
 
-        For Cartesian paths: falls back to TOPPRA since simple profiles can't
-        handle the non-uniform joint movements from IK (especially near singularities).
-        For Joint paths: computes per-joint durations, uses slowest joint's timing.
+        For joint moves: each joint follows its own trapezoidal profile.
+        For Cartesian moves: TCP follows trapezoidal profile along path.
+        """
+        if self._is_cartesian_path():
+            return self._build_trapezoid_trajectory_cartesian()
+        else:
+            return self._build_trapezoid_trajectory_joint()
 
-        Iteratively extends duration if joint limits are violated.
+    def _build_trapezoid_trajectory_joint(self) -> Trajectory:
+        """
+        Build per-joint trapezoidal trajectory.
+
+        Each joint independently follows a trapezoidal velocity profile,
+        synchronized to finish at the same time.
         """
         from interpolatepy.trapezoidal import (
             TrajectoryParams as TrapParams,
             TrapezoidalTrajectory,
         )
 
-        # For Cartesian paths, fall back to TOPPRA - simple profiles can't handle
-        # the non-uniform joint movements from IK (especially near singularities)
-        if self._is_cartesian_path():
-            logger.debug("TRAPEZOID: Falling back to TOPPRA for Cartesian path")
-            return self._build_toppra_trajectory()
+        start_pos = self.joint_path.positions[0]
+        end_pos = self.joint_path.positions[-1]
 
-        # Compute initial duration for joint paths
+        # Compute duration for each joint, take the maximum
         user_duration = self.duration if self.duration and self.duration > 0 else None
         if user_duration:
             duration = user_duration
         else:
             duration = self._compute_joint_duration_trapezoid()
 
-        max_iterations = 10
-        for iteration in range(max_iterations):
-            # Create trapezoidal profile for path parameter s (0 to 1)
+        n_output = max(2, int(np.ceil(duration / self.dt)))
+        times = np.linspace(0.0, duration, n_output)
+        trajectory_rad = np.empty((n_output, 6), dtype=np.float64)
+
+        # Generate trapezoidal profile for each joint
+        for j in range(6):
+            delta = end_pos[j] - start_pos[j]
+            if abs(delta) < 1e-9:
+                # Joint doesn't move
+                trajectory_rad[:, j] = start_pos[j]
+                continue
+
+            # Create trapezoidal profile for this joint
             params = TrapParams(
-                q0=0.0,
-                q1=1.0,
+                q0=start_pos[j],
+                q1=end_pos[j],
                 v0=0.0,
                 v1=0.0,
-                vmax=2.0 / duration,
-                amax=4.0 / (duration * duration),
+                vmax=self.v_max[j],
+                amax=self.a_max[j],
             )
             traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(
                 params
             )
 
-            # Scale times to fit our desired duration
+            # Scale times to match synchronized duration
             time_scale = profile_duration / duration if duration > 0 else 1.0
 
-            n_output = max(2, int(np.ceil(duration / self.dt)))
-            times = np.linspace(0.0, duration, n_output)
+            # Sample the trajectory
+            for i, t in enumerate(times):
+                trajectory_rad[i, j] = traj_fn(t * time_scale)[0]
 
-            # Evaluate profile at scaled times to get s values
-            s_values = np.array(
-                [traj_fn(t * time_scale)[0] for t in times], dtype=np.float64
-            )
-            trajectory_rad = self.joint_path.sample_many(s_values)
-
-            # Check if joint limits are satisfied
-            slowdown = self._compute_slowdown_factor(trajectory_rad, duration)
-            if slowdown <= 1.0:
-                break
-
-            # Extend duration and retry
-            new_duration = duration * slowdown * 1.05  # 5% extra margin
-            if user_duration:
-                logger.warning(
-                    "TRAPEZOID: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration,
-                    new_duration,
-                )
-            duration = new_duration
-        else:
-            raise ValueError(
-                f"TRAPEZOID: Could not satisfy joint limits after {max_iterations} iterations. "
-                f"Path may be too aggressive for current joint limits."
-            )
+        # Enforce velocity limits by stretching segments where needed
+        trajectory_rad, duration = self._enforce_segment_limits(
+            trajectory_rad, duration
+        )
 
         # Convert to motor steps
         steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
 
         return Trajectory(steps=steps, duration=duration)
 
-    def _build_scurve_trajectory(self) -> Trajectory:
+    def _build_trapezoid_trajectory_cartesian(self) -> Trajectory:
         """
-        Build trajectory with S-curve (jerk-limited) velocity profile.
+        Build Cartesian trapezoidal trajectory.
 
-        For Cartesian paths: falls back to TOPPRA since simple profiles can't
-        handle the non-uniform joint movements from IK (especially near singularities).
-        For Joint paths: computes per-joint durations using jerk limits.
-
-        Uses InterpolatePy's DoubleSTrajectory for smooth jerk-limited motion.
-        Similar to RUCKIG but follows the path instead of point-to-point.
-
-        Iteratively extends duration if joint limits are violated.
+        TCP follows trapezoidal velocity profile along the path, with local
+        slowdown where velocity limits would be exceeded.
         """
-        from interpolatepy import DoubleSTrajectory, StateParams, TrajectoryBounds
+        from interpolatepy.trapezoidal import (
+            TrajectoryParams as TrapParams,
+            TrapezoidalTrajectory,
+        )
 
-        # For Cartesian paths, fall back to TOPPRA - simple profiles can't handle
-        # the non-uniform joint movements from IK (especially near singularities)
-        if self._is_cartesian_path():
-            logger.debug("SCURVE: Falling back to TOPPRA for Cartesian path")
-            return self._build_toppra_trajectory()
-
-        # Compute initial duration for joint paths
         user_duration = self.duration if self.duration and self.duration > 0 else None
         if user_duration:
             duration = user_duration
         else:
-            duration = self._compute_joint_duration_scurve()
+            # Use per-segment analysis to handle singularities and wrist flips
+            duration = self._compute_cartesian_duration_from_path()
 
-        max_iterations = 10
-        for iteration in range(max_iterations):
-            # Create S-curve profile for path parameter s (0 to 1)
-            state = StateParams(q_0=0.0, q_1=1.0, v_0=0.0, v_1=0.0)
-            bounds = TrajectoryBounds(
-                v_bound=2.0 / duration,
-                a_bound=4.0 / (duration * duration),
-                j_bound=16.0 / (duration * duration * duration),
-            )
-            traj = DoubleSTrajectory(state, bounds)
-            profile_duration = traj.get_duration()
+        # Compute s-profile limits from joint limits
+        vmax_s, amax_s, _ = self._compute_s_profile_limits()
 
-            # Scale times to fit our desired duration
-            time_scale = profile_duration / duration if duration > 0 else 1.0
+        # Create trapezoidal profile for path parameter s (0 to 1)
+        params = TrapParams(
+            q0=0.0,
+            q1=1.0,
+            v0=0.0,
+            v1=0.0,
+            vmax=vmax_s,
+            amax=amax_s,
+        )
+        traj_fn, profile_duration = TrapezoidalTrajectory.generate_trajectory(params)
 
-            n_output = max(2, int(np.ceil(duration / self.dt)))
-            times = np.linspace(0.0, duration, n_output)
-
-            # Evaluate profile at scaled times to get s values
-            s_values = np.array(
-                [traj.evaluate(t * time_scale)[0] for t in times], dtype=np.float64
-            )
-            trajectory_rad = self.joint_path.sample_many(s_values)
-
-            # Check if joint limits are satisfied
-            slowdown = self._compute_slowdown_factor(trajectory_rad, duration)
-            if slowdown <= 1.0:
-                break
-
-            # Extend duration and retry
-            new_duration = duration * slowdown * 1.05  # 5% extra margin
-            if user_duration:
-                logger.warning(
-                    "SCURVE: Extending duration from %.3fs to %.3fs to respect joint limits",
-                    user_duration,
-                    new_duration,
-                )
-            duration = new_duration
+        # If user specified longer duration, scale to match
+        if user_duration and user_duration > profile_duration:
+            time_scale = profile_duration / user_duration
+            duration = user_duration
         else:
-            raise ValueError(
-                f"SCURVE: Could not satisfy joint limits after {max_iterations} iterations. "
-                f"Path may be too aggressive for current joint limits."
-            )
+            time_scale = 1.0
+            duration = profile_duration
+
+        n_output = max(2, int(np.ceil(duration / self.dt)))
+        times = np.linspace(0.0, duration, n_output)
+
+        # Evaluate profile at scaled times to get profile-shaped s values
+        profile_s = np.array(
+            [traj_fn(t * time_scale)[0] for t in times], dtype=np.float64
+        )
+
+        # Sample path at trapezoid-shaped s values
+        trajectory_rad = self.joint_path.sample_many(profile_s)
+
+        # Enforce velocity limits by stretching segments where needed
+        trajectory_rad, duration = self._enforce_segment_limits(
+            trajectory_rad, duration
+        )
 
         # Convert to motor steps
         steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
@@ -1025,18 +1147,20 @@ class TrajectoryBuilder:
         return Trajectory(steps=steps, duration=actual_duration)
 
     def _estimate_simple_duration(self) -> float:
-        """Estimate duration from path length and velocity limits."""
+        """Estimate minimum duration based on joint velocity limits.
+
+        With adaptive time distribution, each segment gets time proportional
+        to its joint movement, so total duration is sum of per-segment times.
+        """
         positions = self.joint_path.positions
         if len(positions) < 2:
             return self.dt * 2
 
-        # Vectorized: compute all segment deltas at once
+        # Compute per-segment time based on max joint movement
         deltas = np.diff(positions, axis=0)  # (N-1, 6)
-        # Time for each segment is max of per-joint times
         segment_times = np.max(np.abs(deltas) / self.v_max, axis=1)  # (N-1,)
-        total_arc = np.sum(segment_times)
 
-        return max(total_arc, self.dt * 2)
+        return max(float(np.sum(segment_times)), self.dt * 2)
 
 
 def build_cartesian_trajectory(

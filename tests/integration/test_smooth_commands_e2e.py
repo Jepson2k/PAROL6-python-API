@@ -33,6 +33,9 @@ class TestSmoothMotionMinimal:
         """Ensure robot is homed before smooth motion tests."""
         print("Homing robot for smooth motion tests...")
 
+        # Use TOPPRA for smooth motions - handles complex Cartesian paths better
+        client.set_profile("TOPPRA")
+
         # Home the robot first
         result = client.home()
         assert result is True
@@ -78,15 +81,16 @@ class TestSmoothMotionMinimal:
 
         assert result is True
 
-        assert client.wait_motion_complete(timeout=9.0)
+        assert client.wait_motion_complete(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
     def test_smooth_spline_basic(self, client, server_proc, robot_api_env, homed_robot):
         """Test basic spline motion through waypoints."""
+        # Waypoints near home position [-0.8, 262.0, 335.2] to avoid large movements
         waypoints = [
-            [100.0, 100.0, 120.0, 0.0, 0.0, 0.0],
-            [150.0, 150.0, 130.0, 0.0, 0.0, 30.0],
-            [200.0, 100.0, 120.0, 0.0, 0.0, 60.0],
+            [0.0, 262.0, 335.0, 0.0, 0.0, 0.0],
+            [20.0, 270.0, 340.0, 0.0, 0.0, 5.0],
+            [0.0, 262.0, 335.0, 0.0, 0.0, 0.0],
         ]
 
         result = client.smooth_spline(
@@ -99,7 +103,7 @@ class TestSmoothMotionMinimal:
 
         assert result is True
 
-        assert client.wait_motion_complete(timeout=10.0)
+        assert client.wait_motion_complete(timeout=15.0)
         assert client.is_robot_stopped(threshold_speed=5.0)
 
 

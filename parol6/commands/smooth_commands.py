@@ -14,8 +14,8 @@ from numpy.typing import NDArray
 from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, Slerp
 
-from parol6.commands.base import TrajectoryMoveCommandBase
-from parol6.config import CONTROL_RATE_HZ, INTERVAL_S, steps_to_rad
+from parol6.commands.base import TrajectoryMoveCommandBase, parse_motion_params
+from parol6.config import CONTROL_RATE_HZ, INTERVAL_S, LIMITS, steps_to_rad
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.server.command_registry import register_command
 from parol6.server.state import get_fkine_se3
@@ -460,7 +460,14 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
     This base class handles IK conversion and trajectory building.
     """
 
-    __slots__ = ("description", "_system_profile", "frame", "normal_vector")
+    __slots__ = (
+        "description",
+        "frame",
+        "normal_vector",
+        "duration",
+        "velocity_percent",
+        "accel_percent",
+    )
 
     VALID_FRAMES = frozenset(("WRF", "TRF"))
     CLOCKWISE_VALUES = frozenset(("CW", "CLOCKWISE", "TRUE"))
@@ -468,9 +475,11 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
     def __init__(self, description: str = "smooth geometry") -> None:
         super().__init__()
         self.description = description
-        self._system_profile: str = "auto"
         self.frame: str = "WRF"
         self.normal_vector: list[float] | None = None
+        self.duration: float | None = None
+        self.velocity_percent: float | None = None
+        self.accel_percent: float = 100.0
 
     def _transform_params(
         self, command_type: str, params: dict[str, Any]
@@ -487,24 +496,16 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
         return frame, None
 
     @staticmethod
-    def _parse_timing(
-        timing_type: str, timing_value: float, path_length: float
-    ) -> tuple[float | None, str | None]:
-        """Parse timing spec. Returns (duration, error)."""
-        tt = timing_type.upper()
-        if tt == "DURATION":
-            return timing_value, None
-        elif tt == "SPEED":
-            if timing_value <= 0:
-                return None, f"Speed must be positive, got {timing_value}"
-            return path_length / timing_value, None
-        else:
-            return None, f"Unknown timing type: {timing_type}"
-
-    @staticmethod
     def _is_clockwise(value: str) -> bool:
         """Check if value indicates clockwise direction."""
         return value.upper() in BaseSmoothMotionCommand.CLOCKWISE_VALUES
+
+    def _parse_motion_params(self, parts: list[str], start_idx: int) -> None:
+        """Parse duration|velocity_percent|accel_percent from parts[start_idx:]."""
+        params = parse_motion_params(parts, start_idx)
+        self.duration = params.duration
+        self.velocity_percent = params.velocity_percent
+        self.accel_percent = params.accel_percent
 
     def get_current_pose(self, state: "ControllerState") -> np.ndarray:
         """Get current TCP pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
@@ -517,7 +518,6 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
         """Pre-compute trajectory from current position."""
         self.log_debug("  -> Preparing %s...", self.description)
 
-        self._system_profile = state.cartesian_motion_profile.lower()
         current_pose = self.get_current_pose(state)
         self.log_info(
             "  -> Generating %s from position: %s",
@@ -541,10 +541,21 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
             self.fail(str(e))
             return
 
+        # Scale limits by velocity/accel percent (default 100% if not specified)
+        vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
+        acc_pct = self.accel_percent if self.accel_percent is not None else 100.0
+        cart_vel_max = LIMITS.cart.hard.velocity.linear * (vel_pct / 100.0)
+        cart_acc_max = LIMITS.cart.hard.acceleration.linear * (acc_pct / 100.0)
+
         builder = TrajectoryBuilder(
             joint_path=joint_path,
-            profile=self._system_profile,
+            profile=state.motion_profile,
+            velocity_percent=vel_pct,
+            accel_percent=acc_pct,
+            duration=self.duration,
             dt=INTERVAL_S,
+            cart_vel_limit=cart_vel_max,
+            cart_acc_limit=cart_acc_max,
         )
 
         trajectory = builder.build()
@@ -569,7 +580,6 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         "center",
         "radius",
         "plane",
-        "duration",
         "clockwise",
         "center_mode",
     )
@@ -579,16 +589,15 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
         self.center: NDArray[np.floating] | None = None
         self.radius: float = 100.0
         self.plane: str = "XY"
-        self.duration: float = 5.0
         self.clockwise: bool = False
         self.center_mode: str = "ABSOLUTE"
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse SMOOTH_CIRCLE: center|radius|plane|frame|timing_type|timing_value|[cw]|[center_mode]"""
+        """Parse SMOOTH_CIRCLE: center|radius|plane|frame|duration|velocity|accel|[cw]|[center_mode]"""
         if parts[0].upper() != "SMOOTH_CIRCLE":
             return False, None
-        if len(parts) < 7:
-            return False, "SMOOTH_CIRCLE requires at least 7 parameters"
+        if len(parts) < 5:
+            return False, "SMOOTH_CIRCLE requires at least 4 parameters"
 
         try:
             center_list = list(map(float, parts[1].split(",")))
@@ -607,14 +616,11 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
             assert frame is not None
             self.frame = frame
 
-            path_length = 2 * np.pi * self.radius
-            duration, err = self._parse_timing(parts[5], float(parts[6]), path_length)
-            if err:
-                return False, err
-            assert duration is not None
-            self.duration = duration
+            # Parse duration|velocity|accel (all optional)
+            self._parse_motion_params(parts, 5)
 
-            idx = 7
+            # Check for optional cw and center_mode after motion params
+            idx = 8  # After duration|velocity|accel
             if idx < len(parts) and self._is_clockwise(parts[idx]):
                 self.clockwise = True
                 idx += 1
@@ -665,11 +671,13 @@ class SmoothCircleCommand(BaseSmoothMotionCommand):
                 np.array(self.center) if self.center is not None else np.zeros(3)
             )
 
+        # Use duration for geometry sampling, default to 4s for circle if not specified
+        geom_duration = self.duration if self.duration is not None else 4.0
         trajectory = motion_gen.generate_circle(
             center=actual_center,
             radius=self.radius,
             normal=normal,
-            duration=self.duration,
+            duration=geom_duration,
             start_point=effective_start_pose,
         )
 
@@ -690,7 +698,6 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
     __slots__ = (
         "end_pose",
         "center",
-        "duration",
         "clockwise",
     )
 
@@ -698,15 +705,14 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
         super().__init__(description="arc")
         self.end_pose: list[float] | None = None
         self.center: list[float] | None = None
-        self.duration: float = 5.0
         self.clockwise: bool = False
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse SMOOTH_ARC_CENTER: end_pose|center|frame|timing_type|timing_value|[cw]"""
+        """Parse SMOOTH_ARC_CENTER: end_pose|center|frame|duration|velocity|accel|[cw]"""
         if parts[0].upper() != "SMOOTH_ARC_CENTER":
             return False, None
-        if len(parts) < 6:
-            return False, "SMOOTH_ARC_CENTER requires at least 6 parameters"
+        if len(parts) < 4:
+            return False, "SMOOTH_ARC_CENTER requires at least 3 parameters"
 
         try:
             self.end_pose = list(map(float, parts[1].split(",")))
@@ -723,13 +729,12 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
             assert frame is not None
             self.frame = frame
 
-            duration, err = self._parse_timing(parts[4], float(parts[5]), 300)
-            if err:
-                return False, err
-            assert duration is not None
-            self.duration = duration
+            # Parse duration|velocity|accel (all optional)
+            self._parse_motion_params(parts, 4)
 
-            if len(parts) > 6 and self._is_clockwise(parts[6]):
+            # Check for optional cw after motion params
+            idx = 7  # After duration|velocity|accel
+            if idx < len(parts) and self._is_clockwise(parts[idx]):
                 self.clockwise = True
 
             self.description = "arc (center)"
@@ -754,13 +759,15 @@ class SmoothArcCenterCommand(BaseSmoothMotionCommand):
         assert self.end_pose is not None
         assert self.center is not None
 
+        # Use duration for geometry sampling, default to 5s if not specified
+        geom_duration = self.duration if self.duration is not None else 5.0
         return motion_gen.generate_arc(
             start_pose=effective_start_pose,
             end_pose=self.end_pose,
             center=self.center,
             normal=self.normal_vector,
             clockwise=self.clockwise,
-            duration=self.duration,
+            duration=geom_duration,
         )
 
 
@@ -772,7 +779,6 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
         "end_pose",
         "radius",
         "arc_angle",
-        "duration",
         "clockwise",
     )
 
@@ -781,15 +787,14 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
         self.end_pose: list[float] | None = None
         self.radius: float = 100.0
         self.arc_angle: float = 90.0
-        self.duration: float = 5.0
         self.clockwise: bool = False
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse SMOOTH_ARC_PARAM: end_pose|radius|arc_angle|frame|timing_type|timing_value|[cw]"""
+        """Parse SMOOTH_ARC_PARAM: end_pose|radius|arc_angle|frame|duration|velocity|accel|[cw]"""
         if parts[0].upper() != "SMOOTH_ARC_PARAM":
             return False, None
-        if len(parts) < 7:
-            return False, "SMOOTH_ARC_PARAM requires at least 7 parameters"
+        if len(parts) < 5:
+            return False, "SMOOTH_ARC_PARAM requires at least 4 parameters"
 
         try:
             self.end_pose = list(map(float, parts[1].split(",")))
@@ -805,14 +810,12 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
             assert frame is not None
             self.frame = frame
 
-            path_length = self.radius * np.radians(self.arc_angle)
-            duration, err = self._parse_timing(parts[5], float(parts[6]), path_length)
-            if err:
-                return False, err
-            assert duration is not None
-            self.duration = duration
+            # Parse duration|velocity|accel (all optional)
+            self._parse_motion_params(parts, 5)
 
-            if len(parts) > 7 and self._is_clockwise(parts[7]):
+            # Check for optional cw after motion params
+            idx = 8  # After duration|velocity|accel
+            if idx < len(parts) and self._is_clockwise(parts[idx]):
                 self.clockwise = True
 
             self.description = f"arc (r={self.radius}mm)"
@@ -832,13 +835,15 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
     def generate_main_trajectory(self, effective_start_pose):
         """Generate arc based on radius and angle from actual start."""
         assert self.end_pose is not None
+        # Use duration for geometry sampling, default to 5s if not specified
+        geom_duration = self.duration if self.duration is not None else 5.0
         return CircularMotion().generate_arc_from_endpoints(
             start_pose=effective_start_pose,
             end_pose=self.end_pose,
             radius=self.radius,
             normal=self.normal_vector,
             clockwise=self.clockwise,
-            duration=self.duration,
+            duration=geom_duration,
         )
 
 
@@ -846,30 +851,29 @@ class SmoothArcParamCommand(BaseSmoothMotionCommand):
 class SmoothSplineCommand(BaseSmoothMotionCommand):
     """Execute smooth spline motion through waypoints."""
 
-    __slots__ = ("waypoints", "duration")
+    __slots__ = ("waypoints",)
 
     def __init__(self) -> None:
         super().__init__(description="spline")
         self.waypoints: list[list[float]] | None = None
-        self.duration: float = 5.0
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse SMOOTH_SPLINE: waypoints|frame|timing_type|timing_value (two formats supported)"""
+        """Parse SMOOTH_SPLINE: waypoints|frame|duration|velocity|accel (two formats supported)"""
         if parts[0].upper() != "SMOOTH_SPLINE":
             return False, None
-        if len(parts) < 5:
-            return False, "SMOOTH_SPLINE requires at least 5 parameters"
+        if len(parts) < 3:
+            return False, "SMOOTH_SPLINE requires at least 2 parameters"
 
         try:
-            # Alt format: SMOOTH_SPLINE|<count>|<frame>|<timing_type>|<value>|<flattened waypoints...>
-            if len(parts) >= 6 and parts[1].isdigit():
+            # Alt format: SMOOTH_SPLINE|<count>|<frame>|duration|velocity|accel|<flattened waypoints...>
+            if len(parts) >= 4 and parts[1].isdigit():
                 return self._parse_flattened_format(parts)
             return self._parse_semicolon_format(parts)
         except (ValueError, IndexError) as e:
             return False, f"Invalid SMOOTH_SPLINE parameters: {e}"
 
     def _parse_flattened_format(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse: count|frame|timing_type|value|flattened_waypoints..."""
+        """Parse: count|frame|duration|velocity|accel|flattened_waypoints..."""
         num = int(parts[1])
         frame, err = self._parse_frame(parts[2])
         if err:
@@ -877,25 +881,22 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         assert frame is not None
         self.frame = frame
 
-        idx = 5
+        # Parse duration|velocity|accel
+        self._parse_motion_params(parts, 3)
+
+        # Waypoints start after motion params
+        idx = 6
         needed = num * 6
         if len(parts) - idx < needed:
             return False, "Insufficient waypoint values"
         vals = list(map(float, parts[idx : idx + needed]))
         self.waypoints = [vals[i : i + 6] for i in range(0, needed, 6)]
 
-        path_length = self._calc_path_length()
-        duration, err = self._parse_timing(parts[3], float(parts[4]), path_length)
-        if err:
-            return False, err
-        assert duration is not None
-        self.duration = duration
-
         self.description = f"spline ({len(self.waypoints)} points, {self.frame})"
         return True, None
 
     def _parse_semicolon_format(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse: wp1;wp2;...|frame|timing_type|value"""
+        """Parse: wp1;wp2;...|frame|duration|velocity|accel"""
         waypoint_strs = parts[1].split(";")
         self.waypoints = []
         for wp_str in waypoint_strs:
@@ -913,12 +914,8 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
         assert frame is not None
         self.frame = frame
 
-        path_length = self._calc_path_length()
-        duration, err = self._parse_timing(parts[3], float(parts[4]), path_length)
-        if err:
-            return False, err
-        assert duration is not None
-        self.duration = duration
+        # Parse duration|velocity|accel
+        self._parse_motion_params(parts, 3)
 
         self.description = f"spline ({len(self.waypoints)} points, {self.frame})"
         return True, None
@@ -967,6 +964,7 @@ class SmoothSplineCommand(BaseSmoothMotionCommand):
             modified_waypoints = [effective_start_pose] + wps[1:]
             logger.info("    Replaced first waypoint with actual start position")
 
+        # Use duration for geometry sampling, None lets SplineMotion estimate from path length
         trajectory = motion_gen.generate_spline(
             waypoints=modified_waypoints,
             duration=self.duration,

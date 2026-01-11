@@ -17,7 +17,13 @@ import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.commands.base import TrajectoryMoveCommandBase, parse_opt_float
-from parol6.config import DEFAULT_ACCEL_PERCENT, INTERVAL_S, LIMITS, steps_to_rad
+from parol6.config import (
+    DEFAULT_ACCEL_PERCENT,
+    INTERVAL_S,
+    LIMITS,
+    speed_rad_to_steps,
+    steps_to_rad,
+)
 from parol6.motion import JointPath, TrajectoryBuilder
 from parol6.server.command_registry import register_command
 from parol6.utils.errors import IKError
@@ -60,7 +66,8 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
         current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
         target_rad = self._get_target_rad(state)
 
-        profile = state.joint_motion_profile
+        profile = state.motion_profile
+        vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
         accel_pct = (
             float(self.accel_percent) if self.accel_percent else DEFAULT_ACCEL_PERCENT
         )
@@ -80,6 +87,19 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
 
         if len(self.trajectory_steps) == 0:
             raise ValueError("Trajectory calculation resulted in no steps.")
+
+        # Initialize clamping state for real-time velocity/acceleration limiting
+        self._last_vel = np.zeros(6, dtype=np.float64)
+        self._is_cartesian = False
+        # Convert limits from rad/s to steps/s, scaled by user velocity/accel percent
+        v_max_rad = LIMITS.joint.hard.velocity * (vel_pct / 100.0)
+        a_max_rad = LIMITS.joint.hard.acceleration * (accel_pct / 100.0)
+        self._v_max_steps = np.abs(
+            np.asarray(speed_rad_to_steps(v_max_rad), dtype=np.float64)
+        )
+        self._a_max_steps = np.abs(
+            np.asarray(speed_rad_to_steps(a_max_rad), dtype=np.float64)
+        )
 
         self.log_trace(
             "  -> Using profile: %s, duration: %.3fs, steps: %d",

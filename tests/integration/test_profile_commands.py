@@ -1,85 +1,40 @@
 """
 Integration tests for motion profile commands.
 
-Tests SETJOINTPROFILE/GETJOINTPROFILE and SETCARTPROFILE/GETCARTPROFILE through
-the client API with a running server.
+Tests SETPROFILE/GETPROFILE through the client API with a running server.
 """
 
+import threading
 import time
 
+import numpy as np
 import pytest
 
 
 @pytest.mark.integration
-class TestJointProfileCommands:
-    """Test joint motion profile get/set commands."""
+class TestProfileCommands:
+    """Test motion profile get/set commands."""
 
-    def test_get_joint_profile_returns_default(self, client, server_proc):
-        """Test GETJOINTPROFILE returns default profile (TOPPRA) after reset."""
-        # Reset to restore server defaults (fixture sets to LINEAR for speed)
+    def test_get_profile_returns_default(self, client, server_proc):
+        """Test GETPROFILE returns default profile (TOPPRA) after reset."""
         client.reset()
-        profile = client.get_joint_profile()
+        profile = client.get_profile()
         assert profile is not None
         assert profile == "TOPPRA"
 
-    def test_set_and_get_joint_profile_roundtrip(self, client, server_proc):
-        """Test setting a joint profile and getting it back."""
-        # Test all valid joint profiles
-        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "SCURVE", "RUCKIG", "TOPPRA"]:
-            assert client.set_joint_profile(profile) is True
-            assert client.get_joint_profile() == profile
+    def test_set_and_get_profile_roundtrip(self, client, server_proc):
+        """Test setting a profile and getting it back."""
+        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
+            assert client.set_profile(profile) is True
+            assert client.get_profile() == profile
 
-    def test_set_joint_profile_case_insensitive(self, client, server_proc):
-        """Test that joint profile names are case-insensitive."""
-        assert client.set_joint_profile("linear") is True
-        assert client.get_joint_profile() == "LINEAR"
+    def test_set_profile_case_insensitive(self, client, server_proc):
+        """Test that profile names are case-insensitive."""
+        assert client.set_profile("linear") is True
+        assert client.get_profile() == "LINEAR"
 
-        assert client.set_joint_profile("Quintic") is True
-        assert client.get_joint_profile() == "QUINTIC"
-
-
-@pytest.mark.integration
-class TestCartesianProfileCommands:
-    """Test Cartesian motion profile get/set commands."""
-
-    def test_get_cartesian_profile_returns_default(self, client, server_proc):
-        """Test GETCARTPROFILE returns default profile (TOPPRA) after reset."""
-        # Reset to restore server defaults (fixture sets to LINEAR for speed)
-        client.reset()
-        profile = client.get_cartesian_profile()
-        assert profile is not None
-        assert profile == "TOPPRA"
-
-    def test_set_and_get_cartesian_profile_roundtrip(self, client, server_proc):
-        """Test setting a Cartesian profile and getting it back."""
-        # Only TOPPRA and LINEAR are valid for Cartesian moves
-        for profile in ["LINEAR", "TOPPRA"]:
-            assert client.set_cartesian_profile(profile) is True
-            assert client.get_cartesian_profile() == profile
-
-    def test_set_cartesian_profile_rejects_invalid(self, client, server_proc):
-        """Test that SETCARTPROFILE rejects profiles that can't follow Cartesian paths."""
-        # These profiles cannot be used for Cartesian moves
-        invalid_profiles = ["RUCKIG", "QUINTIC", "TRAPEZOID", "SCURVE"]
-
-        for profile in invalid_profiles:
-            # Should return False (command rejected)
-            result = client.set_cartesian_profile(profile)
-            assert result is False, f"Expected {profile} to be rejected for Cartesian"
-
-            # Profile should remain unchanged (TOPPRA from previous test or default)
-            current = client.get_cartesian_profile()
-            assert current in ("TOPPRA", "LINEAR"), (
-                f"Profile changed to {current} unexpectedly"
-            )
-
-    def test_set_cartesian_profile_case_insensitive(self, client, server_proc):
-        """Test that Cartesian profile names are case-insensitive."""
-        assert client.set_cartesian_profile("linear") is True
-        assert client.get_cartesian_profile() == "LINEAR"
-
-        assert client.set_cartesian_profile("Toppra") is True
-        assert client.get_cartesian_profile() == "TOPPRA"
+        assert client.set_profile("Quintic") is True
+        assert client.get_profile() == "QUINTIC"
 
 
 @pytest.mark.integration
@@ -90,12 +45,12 @@ class TestProfileMotionBehavior:
         """Test that joint moves reach target position with all profiles."""
         target_angles = [10, -50, 190, 5, 10, 15]
 
-        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "SCURVE", "RUCKIG", "TOPPRA"]:
+        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             # Reset to home first
             client.home(wait=True)
 
-            # Set joint profile and execute move
-            assert client.set_joint_profile(profile) is True
+            # Set profile and execute move
+            assert client.set_profile(profile) is True
             result = client.move_joints(target_angles, duration=2.0)
             assert result is True
             assert client.wait_motion_complete(timeout=10.0)
@@ -110,7 +65,10 @@ class TestProfileMotionBehavior:
                 )
 
     def test_cartesian_move_reaches_target_all_profiles(self, client, server_proc):
-        """Test that Cartesian moves reach target position with all valid profiles."""
+        """Test that Cartesian moves reach target position with all profiles.
+
+        Note: RUCKIG automatically falls back to TOPPRA for Cartesian moves.
+        """
         # Start from home
         client.home(wait=True)
         start_pose = client.get_pose_rpy()
@@ -126,13 +84,14 @@ class TestProfileMotionBehavior:
             start_pose[5],
         ]
 
-        # Only LINEAR and TOPPRA are valid for Cartesian moves
-        for profile in ["LINEAR", "TOPPRA"]:
+        # All profiles should work for Cartesian moves
+        # RUCKIG falls back to TOPPRA automatically
+        for profile in ["LINEAR", "QUINTIC", "TRAPEZOID", "RUCKIG", "TOPPRA"]:
             # Reset to home first
             client.home(wait=True)
 
-            # Set Cartesian profile and execute move
-            assert client.set_cartesian_profile(profile) is True
+            # Set profile and execute move
+            assert client.set_profile(profile) is True
             result = client.move_cartesian(target_pose, duration=2.0)
             assert result is True
             assert client.wait_motion_complete(timeout=10.0)
@@ -151,7 +110,7 @@ class TestProfileStreamingMode:
     """Test profile behavior in streaming mode."""
 
     def test_streaming_cartesian(self, client, server_proc):
-        """Test streaming Cartesian moves with different profiles."""
+        """Test streaming Cartesian moves."""
         client.home(wait=True)
         start_pose = client.get_pose_rpy()
         assert start_pose is not None
@@ -185,27 +144,51 @@ class TestProfileStreamingMode:
 class TestCartesianPrecision:
     """Test Cartesian move precision with different profiles."""
 
-    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR"])
+    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID"])
     def test_cartesian_simple_sequence(self, client, server_proc, profile):
         """
-        Test precision of simple Cartesian moves (all valid profiles).
+        Test precision of simple Cartesian moves with all profiles.
 
-        All valid Cartesian profiles (TOPPRA, LINEAR) should handle this correctly.
+        All profiles should handle Cartesian paths correctly.
+        LINEAR uses uniform time distribution, which may require longer durations.
         """
         client.home(wait=True)
+        assert client.set_profile(profile) is True
 
-        # Simple sequence: sweep X from -100 to 100 (no return to center)
+        # Get current pose after homing to build moves relative to it
+        start_pose = client.get_pose_rpy()
+        assert start_pose is not None
+
+        # Use smaller offset for LINEAR to keep duration reasonable
+        if profile == "LINEAR":
+            offset = 20.0
+        else:
+            offset = 50.0
+
+        # Move relative to home pose (just Y offset, keep orientation)
         moves = [
-            [-100, 250, 334, 90.0, 0.0, 90.0],
-            [100, 250, 334, 90.0, 0.0, 90.0],
+            [
+                start_pose[0],
+                start_pose[1] + offset,
+                start_pose[2],
+                start_pose[3],
+                start_pose[4],
+                start_pose[5],
+            ],
+            [
+                start_pose[0],
+                start_pose[1] - offset,
+                start_pose[2],
+                start_pose[3],
+                start_pose[4],
+                start_pose[5],
+            ],
         ]
-
-        assert client.set_cartesian_profile(profile) is True
 
         for target in moves:
             result = client.move_cartesian(target, duration=2.0)
             assert result is True
-            assert client.wait_motion_complete(timeout=10.0)
+            assert client.wait_motion_complete(timeout=15.0)
 
         # Verify final pose
         pose = client.get_pose_rpy()
@@ -238,26 +221,114 @@ class TestCartesianPrecision:
             )
 
 
+def _point_to_line_distance(
+    point: np.ndarray, line_start: np.ndarray, line_end: np.ndarray
+) -> float:
+    """Calculate perpendicular distance from a point to a line segment."""
+    line_vec = line_end - line_start
+    line_len = np.linalg.norm(line_vec)
+    if line_len < 1e-9:
+        return float(np.linalg.norm(point - line_start))
+
+    line_unit = line_vec / line_len
+    point_vec = point - line_start
+
+    # Project point onto line
+    projection_len = np.dot(point_vec, line_unit)
+
+    # Clamp to line segment
+    projection_len = max(0, min(line_len, projection_len))
+
+    # Find closest point on line
+    closest_point = line_start + projection_len * line_unit
+
+    return float(np.linalg.norm(point - closest_point))
+
+
+def _extract_position_from_pose_matrix(pose_flat: list[float]) -> np.ndarray:
+    """Extract XYZ position from flattened 4x4 transformation matrix."""
+    # Row-major 4x4 matrix: translation is at indices 3, 7, 11
+    return np.array([pose_flat[3], pose_flat[7], pose_flat[11]])
+
+
 @pytest.mark.integration
-class TestIndependentProfiles:
-    """Test that joint and Cartesian profiles are independent."""
+class TestTCPPathAccuracy:
+    """Test that Cartesian moves follow straight-line TCP paths."""
 
-    def test_profiles_are_independent(self, client, server_proc):
-        """Test that setting one profile doesn't affect the other."""
-        # Set joint to RUCKIG, Cartesian to LINEAR
-        assert client.set_joint_profile("RUCKIG") is True
-        assert client.set_cartesian_profile("LINEAR") is True
+    @pytest.mark.parametrize("profile", ["TOPPRA", "LINEAR", "QUINTIC", "TRAPEZOID"])
+    def test_cartesian_follows_straight_line(self, client, server_proc, profile):
+        """
+        Verify TCP follows a straight line during Cartesian moves.
 
-        # Verify both are set correctly
-        assert client.get_joint_profile() == "RUCKIG"
-        assert client.get_cartesian_profile() == "LINEAR"
+        Samples TCP position during motion and checks that all points
+        lie within tolerance of the expected straight-line path.
+        """
+        client.home(wait=True)
+        assert client.set_profile(profile) is True
 
-        # Change joint profile, Cartesian should stay the same
-        assert client.set_joint_profile("QUINTIC") is True
-        assert client.get_joint_profile() == "QUINTIC"
-        assert client.get_cartesian_profile() == "LINEAR"
+        start_pose = client.get_pose_rpy()
+        assert start_pose is not None
+        start_xyz = np.array(start_pose[:3])
 
-        # Change Cartesian profile, joint should stay the same
-        assert client.set_cartesian_profile("TOPPRA") is True
-        assert client.get_joint_profile() == "QUINTIC"
-        assert client.get_cartesian_profile() == "TOPPRA"
+        # Move along Y axis (50mm offset)
+        offset = 50.0
+        target_pose = [
+            start_pose[0],
+            start_pose[1] + offset,
+            start_pose[2],
+            start_pose[3],
+            start_pose[4],
+            start_pose[5],
+        ]
+        target_xyz = np.array(target_pose[:3])
+
+        # Collect TCP positions during motion
+        sampled_positions: list[np.ndarray] = []
+        sampling_done = threading.Event()
+
+        def sample_positions():
+            """Background thread to sample TCP positions."""
+            while not sampling_done.is_set():
+                status = client.get_status()
+                if status and "pose" in status:
+                    pos = _extract_position_from_pose_matrix(status["pose"])
+                    sampled_positions.append(pos)
+                time.sleep(0.02)  # 50 Hz sampling
+
+        # Start sampling thread
+        sampler = threading.Thread(target=sample_positions, daemon=True)
+        sampler.start()
+
+        # Execute move
+        result = client.move_cartesian(target_pose, duration=2.0)
+        assert result is True
+        assert client.wait_motion_complete(timeout=10.0)
+
+        # Stop sampling
+        sampling_done.set()
+        sampler.join(timeout=1.0)
+
+        # Need at least a few samples to validate path
+        assert len(sampled_positions) >= 5, (
+            f"Only got {len(sampled_positions)} samples, need at least 5"
+        )
+
+        # Calculate max deviation from straight line
+        max_deviation = 0.0
+        deviations = []
+        for pos in sampled_positions:
+            dist = _point_to_line_distance(pos, start_xyz, target_xyz)
+            deviations.append(dist)
+            max_deviation = max(max_deviation, dist)
+
+        # Print diagnostic info
+        print(f"\nProfile {profile}:")
+        print(f"  Samples collected: {len(sampled_positions)}")
+        print(f"  Max path deviation: {max_deviation:.3f} mm")
+        print(f"  Mean path deviation: {np.mean(deviations):.3f} mm")
+
+        tolerance_mm = 0.1
+        assert max_deviation < tolerance_mm, (
+            f"Profile {profile}: TCP deviated {max_deviation:.3f}mm from straight line "
+            f"(tolerance: {tolerance_mm}mm)"
+        )

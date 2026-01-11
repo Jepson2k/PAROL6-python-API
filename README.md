@@ -228,32 +228,23 @@ Uses `MockSerialProcessAdapter` with shared memory IPC for subprocess isolation.
 
 ### Motion profiles
 
-Joint and Cartesian moves use separate profile settings, configured independently:
+Set the motion profile for all moves:
 
 ```python
-client.set_joint_profile("RUCKIG")      # For MoveJoint, MovePose, JogJoint
-client.set_cartesian_profile("TOPPRA")  # For MoveCart, Circle, Arc, Spline, JogCart
+client.set_profile("TOPPRA")  # Default: time-optimal path-following
 ```
 
-**Joint motion profiles** (`SETJOINTPROFILE`):
+**Available profiles** (`SETPROFILE`):
 
 | Profile | Description |
 |---------|-------------|
 | **TOPPRA** | Time-optimal path-following (default) |
-| **RUCKIG** | Jerk-limited point-to-point motion |
+| **RUCKIG** | Jerk-limited point-to-point motion (joint moves only) |
 | **QUINTIC** | C² smooth polynomial trajectories |
 | **TRAPEZOID** | Linear segments with parabolic blends |
-| **SCURVE** | S-curve jerk-limited trajectories |
 | **LINEAR** | Direct interpolation (no smoothing) |
 
-**Cartesian motion profiles** (`SETCARTPROFILE`):
-
-| Profile | Description |
-|---------|-------------|
-| **TOPPRA** | Time-optimal path-following (default) |
-| **LINEAR** | Direct interpolation (no smoothing) |
-
-Note: RUCKIG, QUINTIC, TRAPEZOID, and SCURVE are not available for Cartesian moves because they cannot properly follow Cartesian paths through joint space (especially near singularities).
+Note: RUCKIG is point-to-point only and cannot follow Cartesian paths. When RUCKIG is set, Cartesian moves automatically use TOPPRA instead.
 
 **Offline vs Online**:
 - **Offline pipeline** (MoveCart, MoveJoint, Circle, Spline, etc.): Entire trajectory computed during `setup()`, then executed tick-by-tick directly to hardware

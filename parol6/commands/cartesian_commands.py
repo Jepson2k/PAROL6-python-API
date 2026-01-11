@@ -97,7 +97,6 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
 
         current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
 
-        profile_str = state.cartesian_motion_profile
         vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
         acc_pct = self.accel_percent if self.accel_percent is not None else 100.0
 
@@ -114,7 +113,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
 
         builder = TrajectoryBuilder(
             joint_path=joint_path,
-            profile=profile_str,
+            profile=state.motion_profile,
             velocity_percent=vel_pct,
             accel_percent=acc_pct,
             duration=self.duration,
@@ -129,7 +128,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
 
         self.log_debug(
             "  -> Pre-computed Cartesian path: profile=%s, steps=%d, duration=%.3fs",
-            profile_str,
+            state.motion_profile,
             len(self.trajectory_steps),
             float(self.duration),
         )
