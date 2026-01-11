@@ -177,7 +177,7 @@ flowchart TB
     end
 
     subgraph HW["Hardware / Simulator"]
-        ROBOT["Robot<br/>(Teensy 4.1)"]
+        ROBOT["Robot"]
         SIM["Simulated Dynamics<br/>(subprocess)"]
     end
 
