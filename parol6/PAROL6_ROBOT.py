@@ -552,7 +552,8 @@ if __name__ == "__main__":
     # Simple sanity prints
     from parol6.config import steps_to_rad
 
-    j_step_rad = steps_to_rad(np.array([1, 1, 1, 1, 1, 1], dtype=np.int32))
+    j_step_rad = np.zeros(6, dtype=np.float64)
+    steps_to_rad(np.array([1, 1, 1, 1, 1, 1], dtype=np.int32), j_step_rad)
     print("Smallest step (deg):", np.rad2deg(j_step_rad))
     print("Standby deg:", joint.standby_deg)
     print("Standby rad:", np.deg2rad(joint.standby_deg))

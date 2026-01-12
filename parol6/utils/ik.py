@@ -6,12 +6,13 @@ Shared functions used by multiple command classes for inverse kinematics calcula
 import logging
 import time
 from collections.abc import Sequence
-from typing import NamedTuple
 
 import numpy as np
 import sophuspy as sp
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
 from roboticstoolbox import DHRobot
+from roboticstoolbox.robot.IK import IKResultBuffer
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import IK_SAFETY_MARGINS_RAD
@@ -41,30 +42,34 @@ _ik_cache: dict = {
     "ets": None,
     "buffered_min": None,
     "buffered_max": None,
+    "result_buf": None,  # Pre-allocated IKResultBuffer for zero-allocation IK
 }
 
 
 def _get_cached_ik_data(robot: "DHRobot") -> tuple:
     """
-    Get cached qlim, ets, and buffered limits for the robot.
+    Get cached qlim, ets, buffered limits, and result buffer for the robot.
     Cache is invalidated when robot instance changes.
 
-    Returns (qlim, ets, buffered_min, buffered_max)
+    Returns (qlim, ets, buffered_min, buffered_max, result_buf)
     """
     robot_id = id(robot)
     if _ik_cache["robot_id"] != robot_id:
         qlim = robot.qlim
+        n_joints = qlim.shape[1]
         _ik_cache["robot_id"] = robot_id
         _ik_cache["qlim"] = qlim
         _ik_cache["ets"] = robot.ets()
         _ik_cache["buffered_min"] = qlim[0, :] + IK_SAFETY_MARGINS_RAD[:, 0]
         _ik_cache["buffered_max"] = qlim[1, :] - IK_SAFETY_MARGINS_RAD[:, 1]
+        _ik_cache["result_buf"] = SolveIKResultBuffer(n_joints)
 
     return (
         _ik_cache["qlim"],
         _ik_cache["ets"],
         _ik_cache["buffered_min"],
         _ik_cache["buffered_max"],
+        _ik_cache["result_buf"],
     )
 
 
@@ -86,16 +91,17 @@ AXIS_MAP = {
 }
 
 
+@njit(cache=True)
 def unwrap_angles(
-    q_solution: Sequence[float] | NDArray[np.float64],
-    q_current: Sequence[float] | NDArray[np.float64],
+    q_solution: NDArray[np.float64],
+    q_current: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     """
     Vectorized unwrap: bring solution angles near current by adding/subtracting 2*pi.
     This minimizes joint motion between consecutive configurations.
     """
-    qs = np.asarray(q_solution, dtype=float)
-    qc = np.asarray(q_current, dtype=float)
+    qs = np.asarray(q_solution, dtype=np.float64)
+    qc = np.asarray(q_current, dtype=np.float64)
     diff = qs - qc
     q_unwrapped = qs.copy()
     q_unwrapped[diff > np.pi] -= 2 * np.pi
@@ -103,12 +109,39 @@ def unwrap_angles(
     return q_unwrapped
 
 
-class IKResult(NamedTuple):
-    success: bool
-    q: NDArray[np.float64] | None
-    iterations: int
-    residual: float
-    violations: str | None
+@njit(cache=True)
+def _ik_safety_check(
+    q: NDArray[np.float64],
+    cq: NDArray[np.float64],
+    buffered_min: NDArray[np.float64],
+    buffered_max: NDArray[np.float64],
+    qlim_min: NDArray[np.float64],
+    qlim_max: NDArray[np.float64],
+) -> tuple[bool, bool, int]:
+    """
+    JIT-compiled IK safety validation.
+    Returns (ok, is_recovery_violation, violation_idx).
+    """
+    in_danger_old = (cq < buffered_min) | (cq > buffered_max)
+    dist_old = np.minimum(np.abs(cq - qlim_min), np.abs(cq - qlim_max))
+    dist_new = np.minimum(np.abs(q - qlim_min), np.abs(q - qlim_max))
+    recovery_violations = in_danger_old & (dist_new < dist_old)
+    in_danger_new = (q < buffered_min) | (q > buffered_max)
+    safety_violations = (~in_danger_old) & in_danger_new
+
+    if np.any(recovery_violations):
+        return False, True, int(np.argmax(recovery_violations))
+    if np.any(safety_violations):
+        return False, False, int(np.argmax(safety_violations))
+    return True, False, -1
+
+
+class SolveIKResultBuffer(IKResultBuffer):
+    """IKResultBuffer extended with violations field."""
+
+    def __init__(self, n: int = 6) -> None:
+        super().__init__(n)
+        self.violations: str | None = None
 
 
 def solve_ik(
@@ -116,7 +149,7 @@ def solve_ik(
     target_pose: sp.SE3,
     current_q: Sequence[float] | NDArray[np.float64],
     quiet_logging: bool = False,
-) -> IKResult:
+) -> SolveIKResultBuffer:
     """
     IK solver with per-joint safety margins.
 
@@ -137,22 +170,22 @@ def solve_ik(
 
     Returns
     -------
-    IKResult
+    SolveIKResultBuffer
         success - True if solution found
-        q - Joint configuration in radians (or None if failed)
+        q - Joint configuration in radians
         iterations - Number of iterations used
         residual - Final error value
         violations - Error message if failed, None if successful
     """
     cq: NDArray[np.float64] = np.asarray(current_q, dtype=np.float64)
 
-    # Get cached robot data (qlim, ets, buffered limits)
-    qlim, ets, buffered_min, buffered_max = _get_cached_ik_data(robot)
+    # Get cached robot data (qlim, ets, buffered limits, result buffer)
+    qlim, ets, buffered_min, buffered_max, result = _get_cached_ik_data(robot)
 
     # ik_LM accepts numpy 4x4 matrices - extract from sophuspy SE3
     target_matrix = target_pose.matrix()
 
-    result = ets.ik_LM(
+    ets.ik_LM(
         target_matrix,
         q0=cq,
         tol=1e-10,
@@ -161,56 +194,32 @@ def solve_ik(
         method="sugihara",
         ilimit=10,
         slimit=33,
+        result=result,  # Zero-allocation: C writes to pre-allocated buffer
     )  # Small tol needed so it moves at slow speeds
 
-    q = result[0]
-    success = result[1] > 0
-    iterations = result[2]
-    remaining = result[3]
+    result.violations = None
 
-    violations = None
-
-    if success:
-        # Vectorized safety validation with per-joint direction-aware margins (using cached values)
-
-        # Check which joints were in danger zone (beyond buffer)
-        in_danger_old = (cq < buffered_min) | (cq > buffered_max)
-
-        # Compute distance from nearest limit for all joints
-        dist_old_lower = np.abs(cq - qlim[0, :])
-        dist_old_upper = np.abs(cq - qlim[1, :])
-        dist_old = np.minimum(dist_old_lower, dist_old_upper)
-
-        dist_new_lower = np.abs(q - qlim[0, :])
-        dist_new_upper = np.abs(q - qlim[1, :])
-        dist_new = np.minimum(dist_new_lower, dist_new_upper)
-
-        # Check for recovery violations (was in danger, moved closer to limit)
-        recovery_violations = in_danger_old & (dist_new < dist_old)
-
-        # Check for safety violations (was safe, left buffer zone)
-        in_danger_new = (q < buffered_min) | (q > buffered_max)
-        safety_violations = (~in_danger_old) & in_danger_new
-
-        # Report first violation found
-        if np.any(recovery_violations):
-            idx = np.argmax(recovery_violations)
-            success = False
-            violations = (
-                f"J{idx + 1} moving further into danger zone (recovery blocked)"
-            )
+    if result.success:
+        # JIT-compiled safety validation
+        ok, is_recovery, idx = _ik_safety_check(
+            result.q, cq, buffered_min, buffered_max, qlim[0, :], qlim[1, :]
+        )
+        if not ok:
+            result.success = False
+            if is_recovery:
+                result.violations = (
+                    f"J{idx + 1} moving further into danger zone (recovery blocked)"
+                )
+            else:
+                result.violations = (
+                    f"J{idx + 1} would leave safe zone (buffer violated)"
+                )
             if not quiet_logging:
-                _rate_limited_warning(violations)
-        elif np.any(safety_violations):
-            idx = np.argmax(safety_violations)
-            success = False
-            violations = f"J{idx + 1} would leave safe zone (buffer violated)"
-            if not quiet_logging:
-                _rate_limited_warning(violations)
+                _rate_limited_warning(result.violations)
 
-    if success:
+    if result.success:
         # Valid solution - apply unwrapping to minimize joint motion
-        q_unwrapped = unwrap_angles(q, current_q)
+        q_unwrapped = unwrap_angles(result.q, current_q)
 
         # Verify unwrapped solution still within actual limits
         within_limits = check_limits(
@@ -218,25 +227,76 @@ def solve_ik(
         )
 
         if within_limits:
-            q = q_unwrapped
-        # else: use original result.q which already passed library's limit check
+            result.q[:] = q_unwrapped
+        # else: keep original result.q which already passed library's limit check
     else:
-        violations = "IK failed to solve."
+        result.violations = "IK failed to solve."
 
-    return IKResult(
-        success=success,
-        q=q if success else None,
-        iterations=iterations,
-        residual=remaining,
-        violations=violations,
-    )
+    return result
 
 
 # -----------------------------
 # Fast, vectorized limit checking with edge-triggered logging
 # -----------------------------
-_last_violation_mask = np.zeros(6, dtype=bool)
+# Pre-allocated buffers for check_limits (avoid per-call allocation)
+_cl_viol = np.zeros(6, dtype=np.bool_)
+_cl_below = np.zeros(6, dtype=np.bool_)
+_cl_above = np.zeros(6, dtype=np.bool_)
+_cl_cur_viol = np.zeros(6, dtype=np.bool_)
+_cl_t_below = np.zeros(6, dtype=np.bool_)
+_cl_t_above = np.zeros(6, dtype=np.bool_)
+_last_violation_mask = np.zeros(6, dtype=np.bool_)
 _last_any_violation = False
+
+
+@njit(cache=True)
+def _check_limits_core(
+    q_arr: NDArray[np.float64],
+    t_arr: NDArray[np.float64],
+    mn: NDArray[np.float64],
+    mx: NDArray[np.float64],
+    allow_recovery: bool,
+    has_target: bool,
+    viol_out: NDArray[np.bool_],
+    below_out: NDArray[np.bool_],
+    above_out: NDArray[np.bool_],
+    cur_viol_out: NDArray[np.bool_],
+    t_below_out: NDArray[np.bool_],
+    t_above_out: NDArray[np.bool_],
+) -> bool:
+    """JIT-compiled core of check_limits. Writes masks to output buffers."""
+    for i in range(6):
+        below_out[i] = q_arr[i] < mn[i]
+        above_out[i] = q_arr[i] > mx[i]
+        cur_viol_out[i] = below_out[i] or above_out[i]
+
+    if not has_target:
+        all_ok = True
+        for i in range(6):
+            viol_out[i] = cur_viol_out[i]
+            if viol_out[i]:
+                all_ok = False
+        return all_ok
+
+    for i in range(6):
+        t_below_out[i] = t_arr[i] < mn[i]
+        t_above_out[i] = t_arr[i] > mx[i]
+
+    all_ok = True
+    for i in range(6):
+        t_viol = t_below_out[i] or t_above_out[i]
+        if allow_recovery:
+            rec_ok = (above_out[i] and t_arr[i] <= q_arr[i]) or (
+                below_out[i] and t_arr[i] >= q_arr[i]
+            )
+        else:
+            rec_ok = False
+        ok = (not cur_viol_out[i] and not t_viol) or (cur_viol_out[i] and rec_ok)
+        viol_out[i] = not ok
+        if not ok:
+            all_ok = False
+
+    return all_ok
 
 
 def check_limits(
@@ -255,83 +315,58 @@ def check_limits(
 
     Returns True if move is allowed (within limits or valid recovery), False otherwise.
     """
-    global _last_violation_mask, _last_any_violation
+    global _last_any_violation
 
     q_arr = np.asarray(q, dtype=np.float64).reshape(-1)
     mn = PAROL6_ROBOT._joint_limits_radian[:, 0]
     mx = PAROL6_ROBOT._joint_limits_radian[:, 1]
+    has_target = target_q is not None
+    t_arr = (
+        np.asarray(target_q, dtype=np.float64).reshape(-1)
+        if has_target
+        else np.zeros(6, dtype=np.float64)
+    )
 
-    below = q_arr < mn
-    above = q_arr > mx
-    cur_viol = below | above
-
-    if target_q is None:
-        ok_mask = ~cur_viol
-        t_below = t_above = None
-    else:
-        t = np.asarray(target_q, dtype=np.float64).reshape(-1)
-        t_below = t < mn
-        t_above = t > mx
-        t_viol = t_below | t_above
-        if allow_recovery:
-            rec_ok = (above & (t <= q_arr)) | (below & (t >= q_arr))
-        else:
-            rec_ok = np.zeros(6, dtype=bool)
-        ok_mask = (~cur_viol & ~t_viol) | (cur_viol & rec_ok)
-
-    all_ok = bool(np.all(ok_mask))
+    all_ok = _check_limits_core(
+        q_arr,
+        t_arr,
+        mn,
+        mx,
+        allow_recovery,
+        has_target,
+        _cl_viol,
+        _cl_below,
+        _cl_above,
+        _cl_cur_viol,
+        _cl_t_below,
+        _cl_t_above,
+    )
 
     if log:
-        viol = ~ok_mask
-        any_viol = bool(np.any(viol))
+        any_viol = not all_ok
 
         # Edge-triggered violation logs
         if any_viol and (
-            np.any(viol != _last_violation_mask) or not _last_any_violation
+            np.any(_cl_viol != _last_violation_mask) or not _last_any_violation
         ):
-            idxs = np.where(viol)[0]
+            idxs = np.where(_cl_viol)[0]
             tokens = []
             for i in idxs:
-                if cur_viol[i]:
-                    tokens.append(f"J{i + 1}:" + ("cur<min" if below[i] else "cur>max"))
+                if _cl_cur_viol[i]:
+                    tokens.append(
+                        f"J{i + 1}:" + ("cur<min" if _cl_below[i] else "cur>max")
+                    )
+                elif has_target and _cl_t_below[i]:
+                    tokens.append(f"J{i + 1}:target<min")
+                elif has_target and _cl_t_above[i]:
+                    tokens.append(f"J{i + 1}:target>max")
                 else:
-                    # target violates
-                    if t_below is not None and t_below[i]:
-                        tokens.append(f"J{i + 1}:target<min")
-                    elif t_above is not None and t_above[i]:
-                        tokens.append(f"J{i + 1}:target>max")
-                    else:
-                        tokens.append(f"J{i + 1}:violation")
+                    tokens.append(f"J{i + 1}:violation")
             logger.warning("LIMIT VIOLATION: %s", " ".join(tokens))
         elif (not any_viol) and _last_any_violation:
             logger.info("Limits back in range")
 
-        _last_violation_mask[:] = viol
+        _last_violation_mask[:] = _cl_viol
         _last_any_violation = any_viol
 
     return all_ok
-
-
-def check_limits_mask(
-    q: ArrayLike, target_q: ArrayLike | None = None, allow_recovery: bool = True
-) -> NDArray[np.bool_]:
-    """Return per-joint boolean mask (True if OK for that joint)."""
-    q_arr = np.asarray(q, dtype=np.float64).reshape(-1)
-    mn = PAROL6_ROBOT._joint_limits_radian[:, 0]
-    mx = PAROL6_ROBOT._joint_limits_radian[:, 1]
-    below = q_arr < mn
-    above = q_arr > mx
-    cur_viol = below | above
-
-    if target_q is None:
-        return ~cur_viol
-    t = np.asarray(target_q, dtype=np.float64).reshape(-1)
-    t_below = t < mn
-    t_above = t > mx
-    t_viol = t_below | t_above
-    if allow_recovery:
-        rec_ok = (above & (t <= q_arr)) | (below & (t >= q_arr))
-    else:
-        rec_ok = np.zeros(6, dtype=bool)
-    ok_mask = (~cur_viol & ~t_viol) | (cur_viol & rec_ok)
-    return ok_mask

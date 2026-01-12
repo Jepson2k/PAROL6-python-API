@@ -76,8 +76,8 @@ class GetAnglesCommand(QueryCommand):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Execute immediately and return angle data."""
-        angles_rad = cfg.steps_to_rad(state.Position_in)
-        angles_deg = np.rad2deg(angles_rad)
+        cfg.steps_to_rad(state.Position_in, self._q_rad_buf)
+        angles_deg = np.rad2deg(self._q_rad_buf)
         angles_str = ",".join(map(str, angles_deg))
         self.reply_ascii("ANGLES", angles_str)
 

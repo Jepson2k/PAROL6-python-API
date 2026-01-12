@@ -57,14 +57,23 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
         self.accel_percent: float = DEFAULT_ACCEL_PERCENT
 
     @abstractmethod
-    def _get_target_rad(self, state: ControllerState) -> np.ndarray:
-        """Return target joint positions in radians."""
+    def _get_target_rad(
+        self, state: ControllerState, current_rad: np.ndarray
+    ) -> np.ndarray:
+        """Return target joint positions in radians.
+
+        Args:
+            state: Controller state
+            current_rad: Current joint positions in radians (for IK seed if needed)
+        """
         ...
 
     def do_setup(self, state: ControllerState) -> None:
         """Build trajectory from current position to target using unified motion pipeline."""
-        current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
-        target_rad = self._get_target_rad(state)
+        steps_to_rad(state.Position_in, self._q_rad_buf)
+        # Pass buffer to _get_target_rad; subclasses must not overwrite it
+        target_rad = self._get_target_rad(state, self._q_rad_buf)
+        current_rad = self._q_rad_buf  # Use buffer directly (no copy)
 
         profile = state.motion_profile
         vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
@@ -88,18 +97,14 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
         if len(self.trajectory_steps) == 0:
             raise ValueError("Trajectory calculation resulted in no steps.")
 
-        # Initialize clamping state for real-time velocity/acceleration limiting
-        self._last_vel = np.zeros(6, dtype=np.float64)
         self._is_cartesian = False
         # Convert limits from rad/s to steps/s, scaled by user velocity/accel percent
         v_max_rad = LIMITS.joint.hard.velocity * (vel_pct / 100.0)
         a_max_rad = LIMITS.joint.hard.acceleration * (accel_pct / 100.0)
-        self._v_max_steps = np.abs(
-            np.asarray(speed_rad_to_steps(v_max_rad), dtype=np.float64)
-        )
-        self._a_max_steps = np.abs(
-            np.asarray(speed_rad_to_steps(a_max_rad), dtype=np.float64)
-        )
+        speed_rad_to_steps(v_max_rad, self._steps_buf)
+        self._v_max_steps = np.abs(self._steps_buf.astype(np.float64))
+        speed_rad_to_steps(a_max_rad, self._steps_buf)
+        self._a_max_steps = np.abs(self._steps_buf.astype(np.float64))
 
         self.log_trace(
             "  -> Using profile: %s, duration: %.3fs, steps: %d",
@@ -156,7 +161,9 @@ class MoveJointCommand(JointMoveCommandBase):
         self.is_valid = True
         return (True, None)
 
-    def _get_target_rad(self, state: ControllerState) -> np.ndarray:
+    def _get_target_rad(
+        self, state: ControllerState, current_rad: np.ndarray
+    ) -> np.ndarray:
         """Return target joint positions in radians."""
         return np.asarray(self.target_radians, dtype=np.float64)
 
@@ -200,10 +207,10 @@ class MovePoseCommand(JointMoveCommandBase):
         self.is_valid = True
         return (True, None)
 
-    def _get_target_rad(self, state: ControllerState) -> np.ndarray:
+    def _get_target_rad(
+        self, state: ControllerState, current_rad: np.ndarray
+    ) -> np.ndarray:
         """Solve IK for target pose and return joint positions in radians."""
-        current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
-
         assert self.pose is not None
         target_pose = se3_from_rpy(
             self.pose[0] / 1000.0,

@@ -530,11 +530,11 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
             self.fail("Trajectory generation returned empty result")
             return
 
-        current_q = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
+        steps_to_rad(state.Position_in, self._q_rad_buf)
 
         try:
             joint_path = JointPath.from_poses(
-                cartesian_trajectory, current_q, quiet_logging=True
+                cartesian_trajectory, self._q_rad_buf, quiet_logging=True
             )
         except IKError as e:
             self.log_error("  -> ERROR: IK failed during trajectory generation: %s", e)

@@ -12,10 +12,10 @@ from parol6.config import (
     INTERVAL_S,
     JOG_MIN_STEPS,
     LIMITS,
-    deg_to_steps,
+    deg_to_steps_scalar,
     rad_to_steps,
-    speed_steps_to_rad,
-    steps_to_deg,
+    speed_steps_to_rad_scalar,
+    steps_to_deg_scalar,
     steps_to_rad,
 )
 from parol6.protocol.wire import CommandCode
@@ -238,16 +238,18 @@ class JogCommand(MotionCommand):
 
         distance_steps = 0
         if self.distance_deg is not None:
-            distance_steps = int(deg_to_steps(abs(self.distance_deg), self.joint_index))
+            distance_steps = int(
+                deg_to_steps_scalar(abs(self.distance_deg), self.joint_index)
+            )
             self.target_position = state.Position_in[self.joint_index] + (
                 distance_steps * self.direction
             )
 
             if not (min_limit <= self.target_position <= max_limit):
                 # Convert to degrees for clearer error message
-                target_deg = steps_to_deg(self.target_position, self.joint_index)
-                min_deg = steps_to_deg(min_limit, self.joint_index)
-                max_deg = steps_to_deg(max_limit, self.joint_index)
+                target_deg = steps_to_deg_scalar(self.target_position, self.joint_index)
+                min_deg = steps_to_deg_scalar(min_limit, self.joint_index)
+                max_deg = steps_to_deg_scalar(max_limit, self.joint_index)
                 raise ValueError(
                     f"Target position {target_deg:.2f}° is out of joint limits ({min_deg:.2f}°, {max_deg:.2f}°)."
                 )
@@ -311,9 +313,8 @@ class JogCommand(MotionCommand):
 
         # Sync position on first tick
         if not self._jog_initialized:
-            current_q_rad = list(
-                np.asarray(steps_to_rad(state.Position_in), dtype=float)
-            )
+            steps_to_rad(state.Position_in, self._q_rad_buf)
+            current_q_rad = list(self._q_rad_buf)
             se.sync_position(current_q_rad)
             self._jog_initialized = True
 
@@ -326,8 +327,8 @@ class JogCommand(MotionCommand):
                 self._jog_vel_buf[i] = 0.0
             se.set_jog_velocity(self._jog_vel_buf)
             pos_rad, vel, finished = se.tick()
-            steps = rad_to_steps(np.array(pos_rad))
-            self.set_move_position(state, np.asarray(steps))
+            rad_to_steps(np.asarray(pos_rad), self._steps_buf)
+            self.set_move_position(state, self._steps_buf)
 
             # Check if actually stopped (velocity near zero)
             if finished or all(abs(v) < 0.001 for v in vel):
@@ -340,7 +341,9 @@ class JogCommand(MotionCommand):
             return ExecutionStatus.executing("Jogging (stopping)")
 
         # Set jog velocity for this joint (reuse buffer)
-        speed_rad = float(speed_steps_to_rad(abs(self.speed_out), self.joint_index))
+        speed_rad = float(
+            speed_steps_to_rad_scalar(abs(self.speed_out), self.joint_index)
+        )
         for i in range(6):
             self._jog_vel_buf[i] = 0.0
         self._jog_vel_buf[self.joint_index] = speed_rad * self.direction
@@ -348,8 +351,8 @@ class JogCommand(MotionCommand):
         se.set_jog_velocity(self._jog_vel_buf)
         pos_rad, _vel, _finished = se.tick()
 
-        steps = rad_to_steps(np.array(pos_rad))
-        self.set_move_position(state, np.asarray(steps))
+        rad_to_steps(np.asarray(pos_rad), self._steps_buf)
+        self.set_move_position(state, self._steps_buf)
 
         self.command_step += 1
         return ExecutionStatus.executing("Jogging")

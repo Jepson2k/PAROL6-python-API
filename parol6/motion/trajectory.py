@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,6 +28,8 @@ import toppra.constraint as constraint
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
+
+
 from parol6.utils.ik import solve_ik
 from parol6.utils.se3_utils import se3_from_rpy
 
@@ -38,6 +40,18 @@ if TYPE_CHECKING:
 logging.getLogger("toppra").setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
+
+
+def _rad_to_steps_alloc(rad: NDArray) -> NDArray[np.int32]:
+    """Convert radians to steps, allocating output. For planning phase only."""
+    out = np.zeros(rad.shape, dtype=np.int32)
+    if rad.ndim == 1:
+        rad_to_steps(rad, out)
+    else:
+        # 2D array (trajectory): convert row by row
+        for i in range(rad.shape[0]):
+            rad_to_steps(rad[i], out[i])
+    return out
 
 
 class ProfileType(Enum):
@@ -350,9 +364,8 @@ class TrajectoryBuilder:
         """
         if len(self.joint_path) < 2:
             # Trivial path - single point
-            steps = np.array(
-                [rad_to_steps(self.joint_path.positions[0])],
-                dtype=np.int32,
+            steps = _rad_to_steps_alloc(
+                self.joint_path.positions[0:1]  # Keep 2D shape (1, 6)
             )
             return Trajectory(steps=steps, duration=0.0)
 
@@ -454,7 +467,7 @@ class TrajectoryBuilder:
             )
 
             # Convert to motor steps (vectorized)
-            steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+            steps = _rad_to_steps_alloc(trajectory_rad)
 
             return Trajectory(steps=steps, duration=duration)
 
@@ -487,7 +500,7 @@ class TrajectoryBuilder:
         )
 
         # Convert to motor steps
-        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+        steps = _rad_to_steps_alloc(trajectory_rad)
 
         return Trajectory(steps=steps, duration=duration)
 
@@ -813,7 +826,7 @@ class TrajectoryBuilder:
         )
 
         # Convert to motor steps
-        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+        steps = _rad_to_steps_alloc(trajectory_rad)
 
         return Trajectory(steps=steps, duration=duration)
 
@@ -854,7 +867,7 @@ class TrajectoryBuilder:
         )
 
         # Convert to motor steps
-        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+        steps = _rad_to_steps_alloc(trajectory_rad)
 
         return Trajectory(steps=steps, duration=duration)
 
@@ -930,7 +943,7 @@ class TrajectoryBuilder:
         )
 
         # Convert to motor steps
-        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+        steps = _rad_to_steps_alloc(trajectory_rad)
 
         return Trajectory(steps=steps, duration=duration)
 
@@ -992,7 +1005,7 @@ class TrajectoryBuilder:
         )
 
         # Convert to motor steps
-        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+        steps = _rad_to_steps_alloc(trajectory_rad)
 
         return Trajectory(steps=steps, duration=duration)
 
@@ -1142,7 +1155,7 @@ class TrajectoryBuilder:
         trajectory_rad = trajectory_rad[:count]
 
         # Convert to motor steps (vectorized)
-        steps = cast(NDArray[np.int32], rad_to_steps(trajectory_rad))
+        steps = _rad_to_steps_alloc(trajectory_rad)
 
         return Trajectory(steps=steps, duration=actual_duration)
 

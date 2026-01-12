@@ -195,7 +195,9 @@ class TestTrajectoryBuilder:
             return  # Can't check velocity on single-point trajectory
 
         # Convert steps back to radians for limit checking
-        trajectory_rad = steps_to_rad(traj.steps)
+        trajectory_rad = np.empty(traj.steps.shape, dtype=np.float64)
+        for i in range(len(traj.steps)):
+            steps_to_rad(traj.steps[i], trajectory_rad[i])
 
         # Compute velocities via finite difference
         dt = traj.duration / (len(traj) - 1)

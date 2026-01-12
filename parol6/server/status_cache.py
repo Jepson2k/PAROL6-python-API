@@ -113,7 +113,7 @@ class StatusCache:
                     self._last_tool_name = state.current_tool
 
                 # Vectorized steps->deg
-                self.angles_deg = np.asarray(steps_to_deg(state.Position_in))
+                steps_to_deg(state.Position_in, self.angles_deg)
                 self._angles_ascii = self._format_csv_from_list(self.angles_deg)
                 changed_any = True
 
@@ -125,7 +125,8 @@ class StatusCache:
 
                 # Submit IK request asynchronously
                 try:
-                    q_rad = np.asarray(steps_to_rad(state.Position_in), dtype=float)
+                    q_rad = np.zeros(6, dtype=np.float64)
+                    steps_to_rad(state.Position_in, q_rad)
                     T_matrix = get_fkine_matrix(state)
                     self._ik_client.submit_request(q_rad, T_matrix)
                 except Exception:

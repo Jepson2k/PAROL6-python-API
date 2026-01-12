@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import sophuspy as sp
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig
 
@@ -22,6 +23,15 @@ import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import LIMITS
 
 logger = logging.getLogger(__name__)
+
+
+@njit(cache=True)
+def _transform_vel_wrf_to_body(
+    R_T: np.ndarray, world_vel: np.ndarray, body_vel: np.ndarray
+) -> None:
+    np.dot(R_T, world_vel[:3], body_vel[:3])
+    np.dot(R_T, world_vel[3:], body_vel[3:])
+
 
 # Module-level constant for error checking (avoids tuple creation per check)
 _RUCKIG_ERRORS = (Result.Error, Result.ErrorInvalidInput)
@@ -372,6 +382,15 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         # Must be set before super().__init__ calls _init_limits/_init_state
         self.reference_pose: sp.SE3 | None = None
 
+        # Pre-allocated arrays for Ruckig parameters (reused to avoid per-tick allocations)
+        # Ruckig copies values on assignment, so we update in-place then assign same array
+        # Must be created before super().__init__() since _apply_limits() is called during init
+        self._max_velocity_arr = np.zeros(6, dtype=np.float64)
+        self._max_acceleration_arr = np.zeros(6, dtype=np.float64)
+        self._max_jerk_arr = np.zeros(6, dtype=np.float64)
+        self._target_velocity_arr = np.zeros(6, dtype=np.float64)
+        self._target_acceleration_arr = np.zeros(6, dtype=np.float64)
+
         super().__init__(num_dofs=6, dt=dt)  # 6-DOF: [x, y, z, wx, wy, wz]
 
         # Pre-allocated numpy arrays for hot path (avoids allocations per tick)
@@ -401,14 +420,24 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._apply_limits()
 
     def _apply_limits(self) -> None:
-        """Apply current limits (with scaling) to Ruckig parameters."""
-        self.inp.max_velocity = [self._v_lin_max * self._vel_scale] * 3 + [
-            self._v_ang_max * self._vel_scale
-        ] * 3
-        self.inp.max_acceleration = [self._a_lin_max * self._acc_scale] * 3 + [
-            self._a_ang_max * self._acc_scale
-        ] * 3
-        self.inp.max_jerk = [self._j_lin_max] * 3 + [self._j_ang_max] * 3
+        """Apply current limits (with scaling) to Ruckig parameters.
+
+        Uses pre-allocated numpy arrays to avoid per-tick allocations.
+        """
+        # Update velocity limits in-place
+        self._max_velocity_arr[:3] = self._v_lin_max * self._vel_scale
+        self._max_velocity_arr[3:] = self._v_ang_max * self._vel_scale
+        self.inp.max_velocity = self._max_velocity_arr
+
+        # Update acceleration limits in-place
+        self._max_acceleration_arr[:3] = self._a_lin_max * self._acc_scale
+        self._max_acceleration_arr[3:] = self._a_ang_max * self._acc_scale
+        self.inp.max_acceleration = self._max_acceleration_arr
+
+        # Update jerk limits in-place
+        self._max_jerk_arr[:3] = self._j_lin_max
+        self._max_jerk_arr[3:] = self._j_ang_max
+        self.inp.max_jerk = self._max_jerk_arr
 
     def sync_pose(self, current_pose: sp.SE3) -> None:
         """
@@ -503,15 +532,17 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             is_rotation: True for rotation axes (RX, RY, RZ)
         """
         with self._lock:
-            target_vel = [0.0] * 6
+            # Update target velocity in-place (zero allocation)
+            self._target_velocity_arr.fill(0.0)
             if is_rotation:
-                target_vel[3 + axis] = velocity
+                self._target_velocity_arr[3 + axis] = velocity
             else:
-                target_vel[axis] = velocity
+                self._target_velocity_arr[axis] = velocity
 
             self.inp.control_interface = ControlInterface.Velocity
-            self.inp.target_velocity = target_vel
-            self.inp.target_acceleration = [0.0] * 6
+            self.inp.target_velocity = self._target_velocity_arr
+            self._target_acceleration_arr.fill(0.0)
+            self.inp.target_acceleration = self._target_acceleration_arr
 
             self._apply_limits()
             self.active = True
@@ -551,16 +582,15 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             # Body velocity = R^T @ world velocity
             R = self.reference_pose.rotationMatrix()
 
-            # Transform linear velocity (first 3 components)
-            body_vel_lin = R.T @ self._world_vel_buf[:3]
-            # Transform angular velocity (last 3 components)
-            body_vel_ang = R.T @ self._world_vel_buf[3:]
+            # JIT-compiled transform into target buffer (zero allocation)
+            _transform_vel_wrf_to_body(
+                R.T, self._world_vel_buf, self._target_velocity_arr
+            )
 
-            # Assign to Ruckig input - must use list() for Ruckig compatibility
-            # (slice assignment like inp.target_velocity[:3] = numpy_array doesn't work)
             self.inp.control_interface = ControlInterface.Velocity
-            self.inp.target_velocity = list(body_vel_lin) + list(body_vel_ang)
-            self.inp.target_acceleration = [0.0] * 6
+            self.inp.target_velocity = self._target_velocity_arr
+            self._target_acceleration_arr.fill(0.0)
+            self.inp.target_acceleration = self._target_acceleration_arr
 
             self._apply_limits()
             self.active = True

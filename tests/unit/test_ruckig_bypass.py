@@ -22,7 +22,8 @@ class MockState:
         from parol6.config import HOME_ANGLES_DEG
 
         home_rad = np.deg2rad(HOME_ANGLES_DEG)
-        self.Position_in = np.array(rad_to_steps(home_rad), dtype=np.int32)
+        self.Position_in = np.zeros(6, dtype=np.int32)
+        rad_to_steps(home_rad, self.Position_in)
         self.Position_out = np.zeros(6, dtype=np.int32)
         self.Speed_out = np.zeros(6, dtype=np.int32)
         self.Command_out = 0
@@ -181,7 +182,8 @@ class TestRuckigExecution:
 
         # Verify final step reaches target
         final_steps = trajectory.steps[-1]
-        final_rad = steps_to_rad(final_steps)
+        final_rad = np.zeros(6, dtype=np.float64)
+        steps_to_rad(final_steps, final_rad)
 
         error_deg = np.rad2deg(np.abs(final_rad - end_rad))
         max_error = np.max(error_deg)
@@ -231,7 +233,8 @@ class TestQuinticGeometry:
         mid_idx = n_steps // 2
 
         mid_steps = trajectory.steps[mid_idx]
-        mid_rad = steps_to_rad(mid_steps)
+        mid_rad = np.zeros(6, dtype=np.float64)
+        steps_to_rad(mid_steps, mid_rad)
 
         # Quintic timing at t=0.5 gives s = 10*(0.5)^3 - 15*(0.5)^4 + 6*(0.5)^5 = 0.5
         # So midpoint should be halfway along path

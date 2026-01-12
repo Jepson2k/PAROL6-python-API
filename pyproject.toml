@@ -53,6 +53,7 @@ dependencies = [
     "toppra>=0.6.3",
     "interpolatepy>=2.0.0",
     "numpy>=2.0",
+    "numba>=0.59",
     "sophuspy @ git+https://github.com/Jepson2k/SophusPy.git"
 ]
 

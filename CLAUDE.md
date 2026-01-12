@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PAROL6 Python API is a lightweight client and headless controller for PAROL6 6-DOF robot arms. It provides:
+PAROL6 Python API is a lightweight client and controller for PAROL6 6-DOF robot arms. It provides:
 - **AsyncRobotClient**: Async UDP client for robot control
 - **RobotClient**: Synchronous wrapper for imperative scripts
-- **Headless Controller**: Fixed-rate control loop with serial/simulator transport
+- **Controller**: Fixed-rate control loop with serial/simulator transport
 
 ## Architecture
 
@@ -19,7 +19,7 @@ PAROL6 Python API is a lightweight client and headless controller for PAROL6 6-D
          UDP commands (port 5001)
          Multicast status (239.255.0.101:50510)
 ┌──────────────────▼──────────────────────┐
-│        Headless Controller              │
+│              Controller                 │
 │  (parol6/server/controller.py)          │
 │  - 250 Hz control loop (configurable)   │
 │  - Command queue & execution            │
@@ -47,7 +47,7 @@ mypy parol6/
 pre-commit run -a
 
 # Testing (simulator used by default)
-pytest -m "unit or integration"
+pytest
 
 # Run specific test file
 pytest tests/unit/test_wire.py -v
@@ -59,7 +59,7 @@ pytest -m hardware --run-hardware
 ## Controller CLI
 
 ```bash
-# Start headless controller
+# Start controller
 parol6-server --log-level=INFO
 
 # With explicit serial port
@@ -71,7 +71,7 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 ## Key Modules
 
 - **`parol6/client/async_client.py`**: Primary API - async UDP client with motion commands, queries, and status streaming
-- **`parol6/server/controller.py`**: Headless controller with fixed-rate loop and command execution
+- **`parol6/server/controller.py`**: Controller with fixed-rate loop and command execution
 - **`parol6/commands/`**: Polymorphic command classes using `@register_command("NAME")` decorator
 - **`parol6/protocol/wire.py`**: Binary frame packing/unpacking (START=0xFFFFFF, END=0x0102)
 - **`parol6/PAROL6_ROBOT.py`**: Robot kinematics config, DH parameters, joint limits, tool transforms

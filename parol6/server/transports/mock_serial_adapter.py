@@ -134,7 +134,7 @@ class MockSerialProcessAdapter:
 
             # Calculate deg_to_steps ratios per joint
             deg_to_steps_ratios = np.array(
-                [cfg.deg_to_steps(1.0, i) for i in range(6)], dtype=np.float64
+                [cfg.deg_to_steps_scalar(1.0, i) for i in range(6)], dtype=np.float64
             )
 
             # Spawn subprocess

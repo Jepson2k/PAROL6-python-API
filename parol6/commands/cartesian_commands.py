@@ -12,7 +12,7 @@ import numpy as np
 import sophuspy as sp
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
+    pass
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import (
@@ -95,7 +95,8 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
         """Pre-compute joint trajectory that follows straight-line Cartesian path."""
         assert self.initial_pose is not None and self.target_pose is not None
 
-        current_rad = np.asarray(steps_to_rad(state.Position_in), dtype=np.float64)
+        steps_to_rad(state.Position_in, self._q_rad_buf)
+        current_rad = self._q_rad_buf
 
         vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
         acc_pct = self.accel_percent if self.accel_percent is not None else 100.0
@@ -144,7 +145,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
                 return ExecutionStatus.completed("MOVECART: no executor")
 
             # Get current joint position for IK seed
-            current_q_rad = cast("NDArray[np.float64]", steps_to_rad(state.Position_in))
+            steps_to_rad(state.Position_in, self._q_rad_buf)
 
             # Initialize on first tick, or if executor not active (streaming interrupted)
             if not self._streaming_initialized or not cse.active:
@@ -167,7 +168,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
             smoothed_pose, _vel, finished = cse.tick()
 
             # Solve IK for the smoothed Cartesian pose
-            ik_solution = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, current_q_rad)
+            ik_solution = solve_ik(PAROL6_ROBOT.robot, smoothed_pose, self._q_rad_buf)
             if not ik_solution.success or ik_solution.q is None:
                 if not self._ik_stopping:
                     logger.warning(
@@ -194,8 +195,8 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
                 self._ik_stopping = False
 
             # Send joint position to robot
-            steps = cast("NDArray[np.int32]", rad_to_steps(ik_solution.q))
-            self.set_move_position(state, steps)
+            rad_to_steps(ik_solution.q, self._steps_buf)
+            self.set_move_position(state, self._steps_buf)
 
             if finished:
                 self.log_info("%s (streaming) finished.", self.__class__.__name__)
@@ -351,7 +352,7 @@ class CartesianJogCommand(MotionCommand):
             self.is_finished = True
             return ExecutionStatus.completed("CARTJOG: no executor")
 
-        q_current = cast("NDArray[np.float64]", steps_to_rad(state.Position_in))
+        steps_to_rad(state.Position_in, self._q_rad_buf)
 
         # Initialize only if not already active (preserve velocity across streaming)
         if not cse.active:
@@ -365,10 +366,10 @@ class CartesianJogCommand(MotionCommand):
 
             if not finished and np.dot(smoothed_vel, smoothed_vel) > 1e-8:
                 target_pose = self._apply_smoothed_velocity(state, smoothed_vel)
-                ik_result = solve_ik(PAROL6_ROBOT.robot, target_pose, q_current)
+                ik_result = solve_ik(PAROL6_ROBOT.robot, target_pose, self._q_rad_buf)
                 if ik_result.success and ik_result.q is not None:
-                    steps = cast("NDArray[np.int32]", rad_to_steps(ik_result.q))
-                    self.set_move_position(state, steps)
+                    rad_to_steps(ik_result.q, self._steps_buf)
+                    self.set_move_position(state, self._steps_buf)
                 return ExecutionStatus.executing("CARTJOG (stopping)")
 
             self.is_finished = True
@@ -398,7 +399,7 @@ class CartesianJogCommand(MotionCommand):
         _smoothed_pose, smoothed_vel, _finished = cse.tick()
         target_pose = self._apply_smoothed_velocity(state, smoothed_vel)
 
-        ik_result = solve_ik(PAROL6_ROBOT.robot, target_pose, q_current)
+        ik_result = solve_ik(PAROL6_ROBOT.robot, target_pose, self._q_rad_buf)
         if not ik_result.success or ik_result.q is None:
             if not self._ik_stopping:
                 now = time.monotonic()
@@ -434,8 +435,8 @@ class CartesianJogCommand(MotionCommand):
             else:
                 cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
 
-        steps = cast("NDArray[np.int32]", rad_to_steps(ik_result.q))
-        self.set_move_position(state, steps)
+        rad_to_steps(ik_result.q, self._steps_buf)
+        self.set_move_position(state, self._steps_buf)
 
         return ExecutionStatus.executing("CARTJOG")
 

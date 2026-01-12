@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, ClassVar, overload
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 
 from parol6.config import INTERVAL_S, LIMITS, TRACE
 from parol6.protocol.wire import CommandCode
@@ -18,6 +19,9 @@ from parol6.server.state import ControllerState
 from parol6.utils.ik import AXIS_MAP
 
 logger = logging.getLogger(__name__)
+
+_JOINT_LIM_MIN = LIMITS.joint.position.steps[:, 0]
+_JOINT_LIM_MAX = LIMITS.joint.position.steps[:, 1]
 
 
 class ExecutionStatusCode(Enum):
@@ -258,6 +262,8 @@ class CommandBase(ABC):
         "gcode_interpreter",
         "_t0",
         "_t_end",
+        "_q_rad_buf",
+        "_steps_buf",
     )
 
     def __init__(self) -> None:
@@ -270,6 +276,9 @@ class CommandBase(ABC):
         self.gcode_interpreter: Any = None
         self._t0: float | None = None
         self._t_end: float | None = None
+        # Pre-allocated buffers for zero-allocation unit conversions
+        self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
+        self._steps_buf: np.ndarray = np.zeros(6, dtype=np.int32)
 
     # Ensure command objects are usable as dict keys (e.g., in server command_id_map)
     def __hash__(self) -> int:
@@ -478,10 +487,11 @@ class MotionCommand(CommandBase):
             pct = 100.0
         return lo + (hi - lo) * (pct / 100.0)
 
-    def limit_hit_mask(self, pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
-        lims = LIMITS.joint.position.steps
-        return ((speeds > 0) & (pos_steps >= lims[:, 1])) | (
-            (speeds < 0) & (pos_steps <= lims[:, 0])
+    @staticmethod
+    @njit
+    def limit_hit_mask(pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
+        return ((speeds > 0) & (pos_steps >= _JOINT_LIM_MAX)) | (
+            (speeds < 0) & (pos_steps <= _JOINT_LIM_MIN)
         )
 
     def fail_and_idle(self, state: ControllerState, message: str) -> None:

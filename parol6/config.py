@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
 
 if TYPE_CHECKING:
@@ -177,95 +179,163 @@ STANDBY_ANGLES_DEG: list[float] = list(PAROL6_ROBOT.joint.standby_deg)
 HOME_ANGLES_DEG: list[float] = STANDBY_ANGLES_DEG
 
 
-def _apply_ratio(values: NDArray, idx: IndexArg) -> NDArray:
-    """Apply per-joint gear ratio."""
-    if idx is None:
-        return values * _joint_ratio
-    idx_arr = np.asarray(idx)
-    return values * _joint_ratio[idx_arr]
+# JIT helper for rad_to_steps (needs wrapper because of thread-local scratch buffer)
+@njit(cache=True)
+def _rad_to_steps_jit(
+    rad: NDArray[np.float64],
+    out: NDArray[np.int32],
+    scratch: NDArray[np.float64],
+    radian_per_step_inv: float,
+    joint_ratio: NDArray[np.float64],
+) -> NDArray[np.int32]:
+    np.multiply(rad, radian_per_step_inv, scratch)
+    np.multiply(scratch, joint_ratio, scratch)
+    np.rint(scratch, scratch)
+    out[:] = scratch.astype(np.int32)
+    return out
 
 
-def deg_to_steps(deg: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
-    """Convert degrees to steps (gear ratio aware)."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(deg):
-        return np.int32(np.rint((float(deg) / _degree_per_step) * _joint_ratio[idx]))  # type: ignore[arg-type]
-    deg_arr = np.asarray(deg, dtype=np.float64)
-    steps_f = _apply_ratio(deg_arr / _degree_per_step, idx)
-    return np.rint(steps_f).astype(np.int32, copy=False)
+@njit(cache=True)
+def deg_to_steps(deg: NDArray[np.float64], out: NDArray[np.int32]) -> NDArray[np.int32]:
+    """Convert degrees to steps (gear ratio aware). Zero-allocation when out is provided."""
+    for i in range(6):
+        out[i] = np.int32(np.rint((deg[i] / _degree_per_step) * _joint_ratio[i]))
+    return out
 
 
+@njit(cache=True)
+def deg_to_steps_scalar(deg: float, idx: int) -> np.int32:
+    """Convert single degree value to steps."""
+    return np.int32(np.rint((deg / _degree_per_step) * _joint_ratio[idx]))
+
+
+@njit(cache=True)
 def steps_to_deg(
-    steps: ArrayLike, idx: IndexArg = None
-) -> np.float64 | NDArray[np.float64]:
-    """Convert steps to degrees (gear ratio aware)."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
-        return np.float64((float(steps) * _degree_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
-    steps_arr = np.asarray(steps, dtype=np.float64)
-    ratio = _joint_ratio if idx is None else _joint_ratio[np.asarray(idx)]
-    return (steps_arr * _degree_per_step) / ratio
+    steps: NDArray[np.int32], out: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Convert steps to degrees (gear ratio aware). Zero-allocation."""
+    np.multiply(steps, _degree_per_step, out)
+    np.divide(out, _joint_ratio, out)
+    return out
 
 
-def rad_to_steps(rad: ArrayLike, idx: IndexArg = None) -> np.int32 | NDArray[np.int32]:
-    """Convert radians to steps."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(rad):
-        return np.int32(np.rint((float(rad) / _radian_per_step) * _joint_ratio[idx]))  # type: ignore[arg-type]
-    rad_arr = np.asarray(rad, dtype=np.float64)
-    deg_arr = np.rad2deg(rad_arr)
-    return deg_to_steps(deg_arr, idx)
+@njit(cache=True)
+def steps_to_deg_scalar(steps: int, idx: int) -> np.float64:
+    """Convert single steps value to degrees."""
+    return np.float64((float(steps) * _degree_per_step) / _joint_ratio[idx])
 
 
+# Thread-local scratch buffer for rad_to_steps intermediate calculation
+_tls = threading.local()
+
+
+def _get_scratch_f64() -> NDArray[np.float64]:
+    """Get thread-local float64 scratch buffer (6 elements)."""
+    buf = getattr(_tls, "scratch_f64", None)
+    if buf is None:
+        buf = np.zeros(6, dtype=np.float64)
+        _tls.scratch_f64 = buf
+    return buf
+
+
+def rad_to_steps(
+    rad: ArrayLike, out: NDArray[np.int32], idx: IndexArg = None
+) -> NDArray[np.int32]:
+    """Convert radians to steps. Zero-allocation (uses thread-local scratch)."""
+    scratch = _get_scratch_f64()
+    return _rad_to_steps_jit(
+        np.asarray(rad, dtype=np.float64),
+        out,
+        scratch,
+        1.0 / _radian_per_step,
+        _joint_ratio,
+    )
+
+
+@njit(cache=True)
+def rad_to_steps_scalar(rad: float, idx: int) -> np.int32:
+    """Convert single radian value to steps."""
+    return np.int32(np.rint((rad / _radian_per_step) * _joint_ratio[idx]))
+
+
+@njit(cache=True)
 def steps_to_rad(
-    steps: ArrayLike, idx: IndexArg = None
-) -> np.float64 | NDArray[np.float64]:
-    """Convert steps to radians."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(steps):
-        return np.float64((float(steps) * _radian_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
-    deg_arr = steps_to_deg(steps, idx)
-    return np.deg2rad(deg_arr)
+    steps: NDArray[np.int32], out: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Convert steps to radians. Zero-allocation. JIT-compiled."""
+    np.multiply(steps, _radian_per_step, out)
+    np.divide(out, _joint_ratio, out)
+    return out
 
 
+@njit(cache=True)
+def steps_to_rad_scalar(steps: int, idx: int) -> np.float64:
+    """Convert single steps value to radians."""
+    return np.float64((float(steps) * _radian_per_step) / _joint_ratio[idx])
+
+
+@njit(cache=True)
 def speed_steps_to_deg(
-    sps: ArrayLike, idx: IndexArg = None
-) -> np.float64 | NDArray[np.float64]:
-    """Convert speed: steps/s to deg/s."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
-        return np.float64((float(sps) * _degree_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
-    sps_arr = np.asarray(sps, dtype=np.float64)
-    ratio = _joint_ratio if idx is None else _joint_ratio[np.asarray(idx)]
-    return (sps_arr * _degree_per_step) / ratio
+    sps: NDArray[np.int32], out: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Convert speed: steps/s to deg/s. Zero-allocation."""
+    np.multiply(sps, _degree_per_step, out)
+    np.divide(out, _joint_ratio, out)
+    return out
 
 
+@njit(cache=True)
+def speed_steps_to_deg_scalar(sps: float, idx: int) -> np.float64:
+    """Convert single speed value: steps/s to deg/s."""
+    return np.float64((sps * _degree_per_step) / _joint_ratio[idx])
+
+
+@njit(cache=True)
 def speed_deg_to_steps(
-    dps: ArrayLike, idx: IndexArg = None
-) -> np.int32 | NDArray[np.int32]:
-    """Convert speed: deg/s to steps/s."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(dps):
-        return np.int32((float(dps) / _degree_per_step) * _joint_ratio[idx])  # type: ignore[arg-type]
-    dps_arr = np.asarray(dps, dtype=np.float64)
-    stepsps = _apply_ratio(dps_arr / _degree_per_step, idx)
-    return stepsps.astype(np.int32, copy=False)
+    dps: NDArray[np.float64], out: NDArray[np.int32]
+) -> NDArray[np.int32]:
+    """Convert speed: deg/s to steps/s. Zero-allocation."""
+    for i in range(6):
+        out[i] = np.int32((dps[i] / _degree_per_step) * _joint_ratio[i])
+    return out
 
 
+@njit(cache=True)
+def speed_deg_to_steps_scalar(dps: float, idx: int) -> np.int32:
+    """Convert single speed value: deg/s to steps/s."""
+    return np.int32((dps / _degree_per_step) * _joint_ratio[idx])
+
+
+@njit(cache=True)
 def speed_steps_to_rad(
-    sps: ArrayLike, idx: IndexArg = None
-) -> np.float64 | NDArray[np.float64]:
-    """Convert speed: steps/s to rad/s."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(sps):
-        return np.float64((float(sps) * _radian_per_step) / _joint_ratio[idx])  # type: ignore[arg-type]
-    sps_arr = np.asarray(sps, dtype=np.float64)
-    ratio = _joint_ratio if idx is None else _joint_ratio[np.asarray(idx)]
-    return (sps_arr * _radian_per_step) / ratio
+    sps: NDArray[np.int32], out: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Convert speed: steps/s to rad/s. Zero-allocation."""
+    np.multiply(sps, _radian_per_step, out)
+    np.divide(out, _joint_ratio, out)
+    return out
 
 
+@njit(cache=True)
+def speed_steps_to_rad_scalar(sps: float, idx: int) -> np.float64:
+    """Convert single speed value: steps/s to rad/s."""
+    return np.float64((sps * _radian_per_step) / _joint_ratio[idx])
+
+
+@njit(cache=True)
 def speed_rad_to_steps(
-    rps: ArrayLike, idx: IndexArg = None
-) -> np.int32 | NDArray[np.int32]:
-    """Convert speed: rad/s to steps/s."""
-    if isinstance(idx, (int, np.integer)) and np.isscalar(rps):
-        return np.int32((float(rps) / _radian_per_step) * _joint_ratio[idx])  # type: ignore[arg-type]
-    rps_arr = np.asarray(rps, dtype=np.float64)
-    stepsps = _apply_ratio(rps_arr / _radian_per_step, idx)
-    return stepsps.astype(np.int32, copy=False)
+    rps: NDArray[np.float64], out: NDArray[np.int32]
+) -> NDArray[np.int32]:
+    """Convert speed: rad/s to steps/s. Zero-allocation."""
+    for i in range(6):
+        out[i] = np.int32((rps[i] / _radian_per_step) * _joint_ratio[i])
+    return out
+
+
+@njit(cache=True)
+def speed_rad_to_steps_scalar(rps: float, idx: int) -> np.int32:
+    """Convert single speed value: rad/s to steps/s."""
+    return np.int32((rps / _radian_per_step) * _joint_ratio[idx])
 
 
 # -----------------------------------------------------------------------------
@@ -356,13 +426,13 @@ def _build_kinodynamic(
     a_steps_arr = np.asarray(a_steps, dtype=np.int32)
     j_steps_arr = np.asarray(j_steps, dtype=np.int32)
     v_rad = np.array(
-        [float(speed_steps_to_rad(v_steps_arr[i], idx=i)) for i in range(6)]
+        [float(speed_steps_to_rad_scalar(v_steps_arr[i], i)) for i in range(6)]
     )
     a_rad = np.array(
-        [float(speed_steps_to_rad(a_steps_arr[i], idx=i)) for i in range(6)]
+        [float(speed_steps_to_rad_scalar(a_steps_arr[i], i)) for i in range(6)]
     )
     j_rad = np.array(
-        [float(speed_steps_to_rad(j_steps_arr[i], idx=i)) for i in range(6)]
+        [float(speed_steps_to_rad_scalar(j_steps_arr[i], i)) for i in range(6)]
     )
     return Kinodynamic(
         velocity=v_rad,
@@ -377,10 +447,12 @@ def _build_kinodynamic(
 def _build_joint_position(limits_deg: NDArray) -> JointPosition:
     """Build JointPosition from degree limits."""
     limits_rad = np.deg2rad(limits_deg)
+    # Allocate once for module init (not hot path)
+    tmp = np.zeros(6, dtype=np.int32)
     limits_steps = np.column_stack(
         [
-            deg_to_steps(limits_deg[:, 0]),
-            deg_to_steps(limits_deg[:, 1]),
+            deg_to_steps(limits_deg[:, 0], tmp).copy(),
+            deg_to_steps(limits_deg[:, 1], tmp).copy(),
         ]
     )
     return JointPosition(deg=limits_deg.copy(), rad=limits_rad, steps=limits_steps)

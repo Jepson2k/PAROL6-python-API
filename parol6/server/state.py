@@ -14,7 +14,6 @@ import sophuspy as sp
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import steps_to_rad
-from parol6.utils.se3_utils import se3_from_matrix
 from parol6.protocol.wire import CommandCode
 
 
@@ -154,10 +153,15 @@ class ControllerState:
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
     _fkine_last_tool: str = ""
-    _fkine_se3: Any = None  # sophuspy SE3 instance
+    _fkine_se3: Any = field(
+        default_factory=sp.SE3
+    )  # sophuspy SE3 instance (pre-allocated)
     _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
     _fkine_flat_mm: np.ndarray = field(
         default_factory=lambda: np.zeros((16,), dtype=np.float64)
+    )
+    _fkine_q_rad: np.ndarray = field(
+        default_factory=lambda: np.zeros((6,), dtype=np.float64)
     )
 
     def reset(self) -> None:
@@ -231,8 +235,7 @@ class ControllerState:
         self.ema_command_period_s = 0.0
         self.command_timestamps.clear()
 
-        # Invalidate fkine cache
-        self._fkine_se3 = None
+        # Invalidate fkine cache (SE3 is pre-allocated, just reset tracking)
         self._fkine_last_pos_in.fill(0)
         self._fkine_last_tool = ""
 
@@ -250,8 +253,7 @@ class ControllerState:
             self._current_tool = tool_name
             # Apply tool to robot model (rebuilds with tool as final link)
             PAROL6_ROBOT.apply_tool(tool_name)
-            # Invalidate cache
-            self._fkine_se3 = None
+            # Cache invalidated via tool_changed check in ensure_fkine_updated
             logger.info(f"Tool changed to {tool_name}, fkine cache invalidated")
 
 
@@ -364,8 +366,7 @@ def invalidate_fkine_cache() -> None:
     Call this when the robot model changes (e.g., tool change).
     """
     state = get_state()
-    state._fkine_se3 = None
-    state._fkine_last_tool = ""
+    state._fkine_last_tool = ""  # SE3 is pre-allocated, just reset tracking
     logger.debug("fkine cache invalidated")
 
 
@@ -385,18 +386,19 @@ def ensure_fkine_updated(state: ControllerState) -> None:
     pos_changed = not np.array_equal(state.Position_in, state._fkine_last_pos_in)
     tool_changed = state.current_tool != state._fkine_last_tool
 
-    if pos_changed or tool_changed or state._fkine_se3 is None:
-        # Recompute fkine
-        q = steps_to_rad(state.Position_in)
+    if pos_changed or tool_changed:
+        # Recompute fkine (zero-allocation using pre-allocated buffer)
+        steps_to_rad(state.Position_in, state._fkine_q_rad)
         assert PAROL6_ROBOT.robot is not None
-        T_raw = cast(Any, PAROL6_ROBOT.robot).fkine(q)
+        T_raw = cast(Any, PAROL6_ROBOT.robot).fkine(state._fkine_q_rad)
 
         # Cache as 4x4 matrix first (fkine returns spatialmath SE3, extract .A)
         mat = np.asarray(T_raw.A, dtype=np.float64).copy()
         np.copyto(state._fkine_mat, mat)
 
-        # Convert to sophuspy SE3 for fast operations
-        state._fkine_se3 = se3_from_matrix(mat)
+        # Update sophuspy SE3 in-place (avoids allocation vs creating new SE3)
+        state._fkine_se3.setRotationMatrix(mat[:3, :3])
+        state._fkine_se3.setTranslation(mat[:3, 3])
 
         # Cache as flattened 16-vector with mm translation
         flat = mat.reshape(-1).copy()

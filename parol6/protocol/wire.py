@@ -13,10 +13,60 @@ from enum import IntEnum
 from typing import Literal, cast
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 
 from .types import Axis, Frame, PingResult, StatusAggregate
 
 logger = logging.getLogger(__name__)
+
+
+@njit(cache=True)
+def _pack_positions(out: np.ndarray, values: np.ndarray, offset: int) -> None:
+    for i in range(6):
+        v = int(values[i]) & 0xFFFFFF
+        j = offset + i * 3
+        out[j] = (v >> 16) & 0xFF
+        out[j + 1] = (v >> 8) & 0xFF
+        out[j + 2] = v & 0xFF
+
+
+@njit(cache=True)
+def _unpack_positions(data: np.ndarray, out: np.ndarray) -> None:
+    for i in range(6):
+        j = i * 3
+        val = (int(data[j]) << 16) | (int(data[j + 1]) << 8) | int(data[j + 2])
+        if val >= 0x800000:
+            val -= 0x1000000
+        out[i] = val
+
+
+@njit(cache=True)
+def _pack_bitfield(arr: np.ndarray) -> int:
+    """Pack 8-element array into a single byte (MSB first)."""
+    return (
+        (int(arr[0] != 0) << 7)
+        | (int(arr[1] != 0) << 6)
+        | (int(arr[2] != 0) << 5)
+        | (int(arr[3] != 0) << 4)
+        | (int(arr[4] != 0) << 3)
+        | (int(arr[5] != 0) << 2)
+        | (int(arr[6] != 0) << 1)
+        | int(arr[7] != 0)
+    )
+
+
+@njit(cache=True)
+def _unpack_bitfield(byte_val: int, out: np.ndarray) -> None:
+    """Unpack a byte into 8 bits (MSB first) into output array."""
+    out[0] = (byte_val >> 7) & 1
+    out[1] = (byte_val >> 6) & 1
+    out[2] = (byte_val >> 5) & 1
+    out[3] = (byte_val >> 4) & 1
+    out[4] = (byte_val >> 3) & 1
+    out[5] = (byte_val >> 2) & 1
+    out[6] = (byte_val >> 1) & 1
+    out[7] = byte_val & 1
+
 
 # Precomputed bit-unpack lookup table for 0..255 (MSB..LSB)
 # Using NumPy ensures fast vectorized selection without per-call allocations.
@@ -24,12 +74,6 @@ _BIT_UNPACK = np.unpackbits(
     np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="big"
 )
 
-# Pre-allocated work buffers for unpack_rx_frame_into (avoid per-call allocations)
-_UNPACK_BUF_B = np.zeros((12, 3), dtype=np.uint8)
-_UNPACK_BUF_POS = np.zeros(6, dtype=np.int32)
-_UNPACK_BUF_SPD = np.zeros(6, dtype=np.int32)
-_SIGN_THRESHOLD = 1 << 23
-_SIGN_ADJUST = 1 << 24
 START = b"\xff\xff\xff"
 END = b"\x01\x02"
 PAYLOAD_LEN = 52  # matches existing firmware expectation
@@ -67,22 +111,7 @@ class CommandCode(IntEnum):
     IDLE = 255
 
 
-def split_bitfield(byte_val: int) -> list[int]:
-    """Split an 8-bit integer into a big-endian list of bits (MSB..LSB)."""
-    return [(byte_val >> i) & 1 for i in range(7, -1, -1)]
-
-
-def fuse_bitfield_2_bytearray(bits: list[int] | Sequence[int]) -> bytes:
-    """
-    Fuse a big-endian list of 8 bits (MSB..LSB) into a single byte.
-    Any truthy value is treated as 1.
-    """
-    number = 0
-    for b in bits[:8]:
-        number = (number << 1) | (1 if b else 0)
-    return bytes([number])
-
-
+@njit(cache=True)
 def split_to_3_bytes(n: int) -> tuple[int, int, int]:
     """
     Convert int to signed 24-bit big-endian (two's complement) encoded bytes (b0,b1,b2).
@@ -91,6 +120,7 @@ def split_to_3_bytes(n: int) -> tuple[int, int, int]:
     return ((n24 >> 16) & 0xFF, (n24 >> 8) & 0xFF, n24 & 0xFF)
 
 
+@njit(cache=True)
 def fuse_3_bytes(b0: int, b1: int, b2: int) -> int:
     """
     Convert 3 bytes (big-endian) into a signed 24-bit integer.
@@ -99,6 +129,7 @@ def fuse_3_bytes(b0: int, b1: int, b2: int) -> int:
     return val - 0x1000000 if (val & 0x800000) else val
 
 
+@njit(cache=True)
 def fuse_2_bytes(b0: int, b1: int) -> int:
     """
     Convert 2 bytes (big-endian) into a signed 16-bit integer.
@@ -107,11 +138,12 @@ def fuse_2_bytes(b0: int, b1: int) -> int:
     return val - 0x10000 if (val & 0x8000) else val
 
 
+@njit(cache=True)
 def pack_tx_frame_into(
     out: memoryview,
     position_out: np.ndarray,
     speed_out: np.ndarray,
-    command_code: int | CommandCode,
+    command_code: int,
     affected_joint_out: np.ndarray,
     inout_out: np.ndarray,
     timeout_out: int,
@@ -122,50 +154,22 @@ def pack_tx_frame_into(
 
     Expects 'out' to be a writable buffer of length >= 56 bytes.
     """
-    # Header
-    out[0:3] = START
-    out[3] = PAYLOAD_LEN
+    # Header: 0xFF 0xFF 0xFF + payload length
+    out[0] = 0xFF
+    out[1] = 0xFF
+    out[2] = 0xFF
+    out[3] = 52
 
-    # Positions: 6 joints * 3 bytes each, big-endian 24-bit
-    for i in range(6):
-        v = int(position_out[i]) & 0xFFFFFF
-        j = 4 + i * 3
-        out[j] = (v >> 16) & 0xFF
-        out[j + 1] = (v >> 8) & 0xFF
-        out[j + 2] = v & 0xFF
-
-    # Speeds: 6 joints * 3 bytes each
-    for i in range(6):
-        v = int(speed_out[i]) & 0xFFFFFF
-        j = 22 + i * 3
-        out[j] = (v >> 16) & 0xFF
-        out[j + 1] = (v >> 8) & 0xFF
-        out[j + 2] = v & 0xFF
+    # Positions and speeds: JIT-compiled packing
+    _pack_positions(out, position_out, 4)
+    _pack_positions(out, speed_out, 22)
 
     # Command
-    out[40] = int(command_code)
+    out[40] = command_code
 
-    # Bitfields - manual packing avoids numpy allocation
-    out[41] = (
-        (int(bool(affected_joint_out[0])) << 7)
-        | (int(bool(affected_joint_out[1])) << 6)
-        | (int(bool(affected_joint_out[2])) << 5)
-        | (int(bool(affected_joint_out[3])) << 4)
-        | (int(bool(affected_joint_out[4])) << 3)
-        | (int(bool(affected_joint_out[5])) << 2)
-        | (int(bool(affected_joint_out[6])) << 1)
-        | int(bool(affected_joint_out[7]))
-    )
-    out[42] = (
-        (int(bool(inout_out[0])) << 7)
-        | (int(bool(inout_out[1])) << 6)
-        | (int(bool(inout_out[2])) << 5)
-        | (int(bool(inout_out[3])) << 4)
-        | (int(bool(inout_out[4])) << 3)
-        | (int(bool(inout_out[5])) << 2)
-        | (int(bool(inout_out[6])) << 1)
-        | int(bool(inout_out[7]))
-    )
+    # Bitfields
+    out[41] = _pack_bitfield(affected_joint_out)
+    out[42] = _pack_bitfield(inout_out)
 
     # Timeout
     out[43] = int(timeout_out) & 0xFF
@@ -194,9 +198,9 @@ def pack_tx_frame_into(
     out[55] = 0x02
 
 
+@njit(cache=True)
 def unpack_rx_frame_into(
     data: memoryview,
-    *,
     pos_out: np.ndarray,
     spd_out: np.ndarray,
     homed_out: np.ndarray,
@@ -214,85 +218,35 @@ def unpack_rx_frame_into(
       - timing_out: shape (1,), dtype=int32
       - grip_out: shape (6,), dtype=int32 [device_id, pos, spd, cur, status, obj]
     """
-    global _UNPACK_BUF_B, _UNPACK_BUF_POS, _UNPACK_BUF_SPD
-    try:
-        if len(data) < 52:
-            logger.warning(
-                f"unpack_rx_frame_into: payload too short ({len(data)} bytes)"
-            )
-            return False
-
-        mv = memoryview(data)
-
-        # Positions (0..17) and speeds (18..35), 3 bytes per value, big-endian signed 24-bit
-        # Use pre-allocated buffers to avoid per-call allocations
-        np.copyto(_UNPACK_BUF_B, np.frombuffer(mv[:36], dtype=np.uint8).reshape(12, 3))
-
-        # Decode positions: combine 3 bytes into int32 using pre-allocated buffer
-        # pos = (b0 << 16) | (b1 << 8) | b2
-        _UNPACK_BUF_POS[:] = _UNPACK_BUF_B[:6, 0]
-        _UNPACK_BUF_POS <<= 8
-        _UNPACK_BUF_POS |= _UNPACK_BUF_B[:6, 1]
-        _UNPACK_BUF_POS <<= 8
-        _UNPACK_BUF_POS |= _UNPACK_BUF_B[:6, 2]
-
-        # Decode speeds similarly
-        _UNPACK_BUF_SPD[:] = _UNPACK_BUF_B[6:, 0]
-        _UNPACK_BUF_SPD <<= 8
-        _UNPACK_BUF_SPD |= _UNPACK_BUF_B[6:, 1]
-        _UNPACK_BUF_SPD <<= 8
-        _UNPACK_BUF_SPD |= _UNPACK_BUF_B[6:, 2]
-
-        # Sign-correct 24-bit to int32 (in-place)
-        _UNPACK_BUF_POS[_UNPACK_BUF_POS >= _SIGN_THRESHOLD] -= _SIGN_ADJUST
-        _UNPACK_BUF_SPD[_UNPACK_BUF_SPD >= _SIGN_THRESHOLD] -= _SIGN_ADJUST
-
-        np.copyto(pos_out, _UNPACK_BUF_POS, casting="no")
-        np.copyto(spd_out, _UNPACK_BUF_SPD, casting="no")
-
-        homed_byte = mv[36]
-        io_byte = mv[37]
-        temp_err_byte = mv[38]
-        pos_err_byte = mv[39]
-        timing_b0 = mv[40]
-        timing_b1 = mv[41]
-        # indices 42..43 exist in some variants (timeout/xtr), legacy code ignores
-
-        device_id = mv[44]
-        grip_pos_b0, grip_pos_b1 = mv[45], mv[46]
-        grip_spd_b0, grip_spd_b1 = mv[47], mv[48]
-        grip_cur_b0, grip_cur_b1 = mv[49], mv[50]
-        status_byte = mv[51]
-
-        # Bitfields (MSB..LSB) via LUT (no per-call Python loops)
-        homed_out[:] = _BIT_UNPACK[int(homed_byte)]
-        io_out[:] = _BIT_UNPACK[int(io_byte)]
-        temp_out[:] = _BIT_UNPACK[int(temp_err_byte)]
-        poserr_out[:] = _BIT_UNPACK[int(pos_err_byte)]
-
-        # Timing (legacy semantics: fuse_3_bytes(0, b0, b1))
-        timing_val = fuse_3_bytes(0, int(timing_b0), int(timing_b1))
-        timing_out[0] = int(timing_val)
-
-        # Gripper values
-        grip_pos = fuse_2_bytes(int(grip_pos_b0), int(grip_pos_b1))
-        grip_spd = fuse_2_bytes(int(grip_spd_b0), int(grip_spd_b1))
-        grip_cur = fuse_2_bytes(int(grip_cur_b0), int(grip_cur_b1))
-
-        sbits = _BIT_UNPACK[int(status_byte)]
-        obj_detection = (int(sbits[4]) << 1) | int(sbits[5])
-
-        grip_out[0] = int(device_id)
-        grip_out[1] = int(grip_pos)
-        grip_out[2] = int(grip_spd)
-        grip_out[3] = int(grip_cur)
-        grip_out[4] = int(status_byte)
-        grip_out[5] = int(obj_detection)
-
-        return True
-    except Exception as e:
-        logger.error(f"unpack_rx_frame_into: exception {e}")
+    if len(data) < 52:
         return False
+
+    _unpack_positions(data, pos_out)
+    _unpack_positions(data[18:], spd_out)
+
+    _unpack_bitfield(int(data[36]), homed_out)
+    _unpack_bitfield(int(data[37]), io_out)
+    _unpack_bitfield(int(data[38]), temp_out)
+    _unpack_bitfield(int(data[39]), poserr_out)
+
+    timing_out[0] = fuse_3_bytes(0, int(data[40]), int(data[41]))
+
+    device_id = int(data[44])
+    grip_pos = fuse_2_bytes(int(data[45]), int(data[46]))
+    grip_spd = fuse_2_bytes(int(data[47]), int(data[48]))
+    grip_cur = fuse_2_bytes(int(data[49]), int(data[50]))
+    status_byte = int(data[51])
+
+    obj_detection = ((status_byte >> 3) & 1) << 1 | ((status_byte >> 2) & 1)
+
+    grip_out[0] = device_id
+    grip_out[1] = grip_pos
+    grip_out[2] = grip_spd
+    grip_out[3] = grip_cur
+    grip_out[4] = status_byte
+    grip_out[5] = obj_detection
+
+    return True
 
 
 # =========================

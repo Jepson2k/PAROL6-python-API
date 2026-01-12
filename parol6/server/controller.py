@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 
 from parol6.ack_policy import AckPolicy
 from parol6.commands.base import (
@@ -49,6 +50,28 @@ from parol6.config import (
 )
 
 logger = logging.getLogger("parol6.server.controller")
+
+
+@njit(cache=True)
+def _arrays_dirty(
+    pos: np.ndarray,
+    pos_last: np.ndarray,
+    spd: np.ndarray,
+    spd_last: np.ndarray,
+    aff: np.ndarray,
+    aff_last: np.ndarray,
+    io: np.ndarray,
+    io_last: np.ndarray,
+    grip: np.ndarray,
+    grip_last: np.ndarray,
+) -> bool:
+    return (
+        not np.array_equal(pos, pos_last)
+        or not np.array_equal(spd, spd_last)
+        or not np.array_equal(aff, aff_last)
+        or not np.array_equal(io, io_last)
+        or not np.array_equal(grip, grip_last)
+    )
 
 
 @dataclass
@@ -468,21 +491,18 @@ class Controller:
                     now = time.perf_counter()
                     dirty = (
                         (state.Command_out.value != self._last_tx["cmd"])
-                        or (
-                            not np.array_equal(state.Position_out, self._last_tx["pos"])
-                        )
-                        or (not np.array_equal(state.Speed_out, self._last_tx["spd"]))
-                        or (
-                            not np.array_equal(
-                                state.Affected_joint_out, self._last_tx["aff"]
-                            )
-                        )
-                        or (not np.array_equal(state.InOut_out, self._last_tx["io"]))
                         or (int(state.Timeout_out) != int(self._last_tx["tout"]))
-                        or (
-                            not np.array_equal(
-                                state.Gripper_data_out, self._last_tx["grip"]
-                            )
+                        or _arrays_dirty(
+                            state.Position_out,
+                            self._last_tx["pos"],
+                            state.Speed_out,
+                            self._last_tx["spd"],
+                            state.Affected_joint_out,
+                            self._last_tx["aff"],
+                            state.InOut_out,
+                            self._last_tx["io"],
+                            state.Gripper_data_out,
+                            self._last_tx["grip"],
                         )
                     )
 
