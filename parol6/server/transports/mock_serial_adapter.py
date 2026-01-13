@@ -157,7 +157,9 @@ class MockSerialProcessAdapter:
             self._process.start()
 
             # Wait for first frame
-            if not self._wait_for_first_frame(timeout=2.0):
+            # Timeout needs to be long enough for subprocess startup on Windows/macOS
+            # with spawn (can take several seconds on CI runners)
+            if not self._wait_for_first_frame(timeout=10.0):
                 # Check if subprocess died (multiprocessing.Process uses is_alive/exitcode)
                 if self._process is not None:
                     if not self._process.is_alive():
@@ -190,7 +192,7 @@ class MockSerialProcessAdapter:
             self._cleanup()
             return False
 
-    def _wait_for_first_frame(self, timeout: float = 2.0) -> bool:
+    def _wait_for_first_frame(self, timeout: float = 10.0) -> bool:
         """Wait for the subprocess to produce its first frame."""
         deadline = time.time() + timeout
         while time.time() < deadline:
