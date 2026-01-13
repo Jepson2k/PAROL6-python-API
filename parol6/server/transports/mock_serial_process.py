@@ -182,7 +182,18 @@ def mock_serial_worker_main(
         CMD_MOVE = 156
 
         sub_logger.info("MockSerial subprocess initialized, entering main loop")
+
+        # Write initial frame immediately before entering loop
+        _encode_payload_into(frame_mv, state)
+        frame_version += 1
+        pack_rx_frame(rx_mv, frame_mv, frame_version, time.time())
+        sub_logger.info(
+            "MockSerial subprocess wrote initial frame (version=%d)", frame_version
+        )
+
+        loop_count = 0
         while not shutdown_event.is_set():
+            loop_count += 1
             now = time.perf_counter()
 
             if now >= next_deadline:
@@ -302,6 +313,11 @@ def mock_serial_worker_main(
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
+        sub_logger.info(
+            "MockSerial subprocess loop exited after %d iterations (shutdown_event.is_set=%s)",
+            loop_count,
+            shutdown_event.is_set(),
+        )
     except Exception as e:
         sub_logger.exception("MockSerial subprocess error: %s", e)
         # Also print to stderr directly in case logging isn't working
