@@ -31,13 +31,30 @@ def _loop_worker(loop: asyncio.AbstractEventLoop) -> None:
 
 def _stop_sync_loop() -> None:
     global _SYNC_LOOP, _SYNC_THREAD
-    if _SYNC_LOOP is not None:
-        try:
-            _SYNC_LOOP.call_soon_threadsafe(_SYNC_LOOP.stop)
-        except Exception:
-            pass
-        _SYNC_LOOP = None
-        _SYNC_THREAD = None
+    if _SYNC_LOOP is None:
+        return
+
+    loop = _SYNC_LOOP
+
+    async def _shutdown():
+        # Cancel all pending tasks
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        # Let cancelled tasks finalize
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        loop.stop()
+
+    try:
+        asyncio.run_coroutine_threadsafe(_shutdown(), loop)
+        if _SYNC_THREAD is not None:
+            _SYNC_THREAD.join(timeout=2.0)
+    except Exception:
+        pass
+
+    _SYNC_LOOP = None
+    _SYNC_THREAD = None
 
 
 def _ensure_sync_loop() -> None:
@@ -382,7 +399,7 @@ class RobotClient:
 
     def wait_motion_complete(
         self,
-        timeout: float = 90.0,
+        timeout: float = 10.0,
         settle_window: float = 0.25,
         speed_threshold: float = 2.0,
         angle_threshold: float = 0.5,

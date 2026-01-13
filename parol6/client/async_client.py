@@ -690,7 +690,7 @@ class AsyncRobotClient:
 
     async def wait_motion_complete(
         self,
-        timeout: float = 90.0,
+        timeout: float = 10.0,
         settle_window: float = 0.25,
         speed_threshold: float = 2.0,
         angle_threshold: float = 0.5,
@@ -727,57 +727,53 @@ class AsyncRobotClient:
                 if timeout_task.done():
                     return False
 
-                # Check speeds from status
+                # Check speeds and angles from status
                 speeds = status.get("speeds")
+                angles = status.get("angles")
+
+                max_speed = None
                 if speeds and isinstance(speeds, Iterable):
                     max_speed = max(abs(s) for s in speeds)
 
-                    # Phase 1: Wait for motion to start
-                    if not motion_started:
-                        if max_speed >= speed_threshold:
-                            motion_started = True
-                            settle_start = None  # Reset settle timer
-                        elif time.time() - start_time > motion_start_timeout:
-                            # Motion never started - consider complete
-                            # This handles cases where command was invalid or no-op
-                            motion_started = True
-
-                    # Phase 2: Wait for motion to complete
-                    if motion_started:
-                        if max_speed < speed_threshold:
-                            if settle_start is None:
-                                settle_start = time.time()
-                            elif time.time() - settle_start > settle_window:
-                                return True
-                        else:
-                            settle_start = None
-
-                # Also check angles as fallback
-                angles = status.get("angles")
-                if angles and not speeds:
-                    if last_angles is not None:
-                        max_change = max(
-                            abs(a - b)
-                            for a, b in zip(angles, last_angles, strict=False)
-                        )
-
-                        # Detect motion start from angle changes
-                        if not motion_started:
-                            if max_change >= angle_threshold:
-                                motion_started = True
-                                settle_start = None
-                            elif time.time() - start_time > motion_start_timeout:
-                                motion_started = True
-
-                        if motion_started:
-                            if max_change < angle_threshold:
-                                if settle_start is None:
-                                    settle_start = time.time()
-                                elif time.time() - settle_start > settle_window:
-                                    return True
-                            else:
-                                settle_start = None
+                max_angle_change = None
+                if angles and last_angles is not None:
+                    max_angle_change = max(
+                        abs(a - b) for a, b in zip(angles, last_angles, strict=False)
+                    )
+                if angles:
                     last_angles = angles
+
+                # Phase 1: Wait for motion to start
+                if not motion_started:
+                    started_by_speed = (
+                        max_speed is not None and max_speed >= speed_threshold
+                    )
+                    started_by_angle = (
+                        max_angle_change is not None
+                        and max_angle_change >= angle_threshold
+                    )
+                    if started_by_speed or started_by_angle:
+                        motion_started = True
+                        settle_start = None
+                    elif time.time() - start_time > motion_start_timeout:
+                        # Motion never started - consider complete
+                        motion_started = True
+
+                # Phase 2: Wait for motion to complete
+                if motion_started:
+                    # Check if settled: require ALL available metrics to be below threshold
+                    speed_settled = max_speed is None or max_speed < speed_threshold
+                    angle_settled = (
+                        max_angle_change is None or max_angle_change < angle_threshold
+                    )
+
+                    if speed_settled and angle_settled:
+                        if settle_start is None:
+                            settle_start = time.time()
+                        elif time.time() - settle_start > settle_window:
+                            return True
+                    else:
+                        settle_start = None
         finally:
             timeout_task.cancel()
             try:

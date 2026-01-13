@@ -131,7 +131,7 @@ _joint_max_speed: Vec6i = np.array(
 _joint_min_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
 # Jog speeds (steps/s) - 80% of max for safety margin during jogging
-_joint_max_jog_speed: Vec6i = (_joint_max_speed * 0.5).astype(np.int32)
+_joint_max_jog_speed: Vec6i = (_joint_max_speed * 0.8).astype(np.int32)
 _joint_min_jog_speed: Vec6i = np.array([100, 100, 100, 100, 100, 100], dtype=np.int32)
 
 # Joint accelerations (steps/s^2) per joint

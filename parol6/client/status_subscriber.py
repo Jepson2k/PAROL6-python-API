@@ -191,17 +191,19 @@ async def subscribe_status(
                 )
                 continue
 
-    except asyncio.CancelledError:
-        # Normal shutdown path when consumer task is cancelled
-        logger.info("subscribe_status cancelled")
-        raise
+    except (asyncio.CancelledError, GeneratorExit):
+        # Normal shutdown - don't log
+        pass
     except Exception as e:
-        logger.error(f"Error in subscribe_status: {e}", exc_info=True)
-        raise
+        # Log unexpected errors, but not "Event loop is closed" during shutdown
+        if "Event loop is closed" not in str(e):
+            logger.error(f"Error in subscribe_status: {e}")
     finally:
-        if transport:
-            logger.info("Closing transport...")
-            transport.close()
+        try:
+            if transport:
+                transport.close()
+        except Exception:
+            pass
         try:
             sock.close()
         except Exception:

@@ -7,8 +7,6 @@ where tolerance settings (e.g., IK tolerance) might prevent movement
 at certain speeds.
 """
 
-import time
-
 import pytest
 
 from parol6 import RobotClient
@@ -42,7 +40,7 @@ class TestJogSpeedExtremes:
         assert result is True, "Jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        time.sleep(1.0)
+        client.wait_motion_complete(timeout=10, settle_window=1)
 
         # Get final joint angles
         final_angles = client.get_angles()
@@ -79,7 +77,7 @@ class TestJogSpeedExtremes:
         assert result is True, "Jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        time.sleep(1.0)
+        client.wait_motion_complete(timeout=10)
 
         # Get final joint angles
         final_angles = client.get_angles()
@@ -106,7 +104,7 @@ class TestJogSpeedExtremes:
 
         result = client.jog_joint(joint_index=0, speed=10, duration=0.3)
         assert result is True
-        time.sleep(0.8)
+        client.wait_motion_complete(timeout=10)
 
         final_angles_slow = client.get_angles()
         assert final_angles_slow is not None
@@ -118,7 +116,7 @@ class TestJogSpeedExtremes:
 
         result = client.jog_joint(joint_index=0, speed=90, duration=0.3)
         assert result is True
-        time.sleep(0.8)
+        client.wait_motion_complete(timeout=10)
 
         final_angles_fast = client.get_angles()
         assert final_angles_fast is not None
@@ -159,7 +157,7 @@ class TestCartesianJogSpeedExtremes:
         assert result is True, "Cartesian jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        time.sleep(1.0)
+        client.wait_motion_complete(timeout=10)
 
         # Get final pose
         final_pose = client.get_pose_rpy()
@@ -195,7 +193,7 @@ class TestCartesianJogSpeedExtremes:
         assert result is True, "Cartesian jog command failed to send"
 
         # Wait for motion to complete plus some settling time
-        time.sleep(1.0)
+        client.wait_motion_complete(timeout=10)
 
         # Get final pose
         final_pose = client.get_pose_rpy()

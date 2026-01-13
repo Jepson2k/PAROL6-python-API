@@ -11,7 +11,6 @@ from enum import Enum
 from typing import Any, ClassVar, overload
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
 
 from parol6.config import INTERVAL_S, LIMITS, TRACE
 from parol6.protocol.wire import CommandCode
@@ -19,9 +18,6 @@ from parol6.server.state import ControllerState
 from parol6.utils.ik import AXIS_MAP
 
 logger = logging.getLogger(__name__)
-
-_JOINT_LIM_MIN = LIMITS.joint.position.steps[:, 0]
-_JOINT_LIM_MAX = LIMITS.joint.position.steps[:, 1]
 
 
 class ExecutionStatusCode(Enum):
@@ -488,10 +484,9 @@ class MotionCommand(CommandBase):
         return lo + (hi - lo) * (pct / 100.0)
 
     @staticmethod
-    @njit
     def limit_hit_mask(pos_steps: np.ndarray, speeds: np.ndarray) -> np.ndarray:
-        return ((speeds > 0) & (pos_steps >= _JOINT_LIM_MAX)) | (
-            (speeds < 0) & (pos_steps <= _JOINT_LIM_MIN)
+        return ((speeds > 0) & (pos_steps >= LIMITS.joint.position.steps[:, 1])) | (
+            (speeds < 0) & (pos_steps <= LIMITS.joint.position.steps[:, 0])
         )
 
     def fail_and_idle(self, state: ControllerState, message: str) -> None:

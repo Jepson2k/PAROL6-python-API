@@ -270,8 +270,11 @@ class TestTCPPathAccuracy:
         assert start_pose is not None
         start_xyz = np.array(start_pose[:3])
 
-        # Move along Y axis (50mm offset)
-        offset = 50.0
+        # Move along Y axis - smaller offset for LINEAR to keep duration reasonable
+        if profile == "LINEAR":
+            offset = 20.0
+        else:
+            offset = 50.0
         target_pose = [
             start_pose[0],
             start_pose[1] + offset,

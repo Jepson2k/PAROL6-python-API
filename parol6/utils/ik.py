@@ -188,14 +188,14 @@ def solve_ik(
     ets.ik_LM(
         target_matrix,
         q0=cq,
-        tol=1e-10,
+        tol=1e-12,
         joint_limits=True,
         k=0.0,
         method="sugihara",
         ilimit=10,
-        slimit=33,
+        slimit=10,
         result=result,  # Zero-allocation: C writes to pre-allocated buffer
-    )  # Small tol needed so it moves at slow speeds
+    )  # tol=1e-12 required for sub-mm jogs
 
     result.violations = None
 
@@ -205,7 +205,7 @@ def solve_ik(
             result.q, cq, buffered_min, buffered_max, qlim[0, :], qlim[1, :]
         )
         if not ok:
-            result.success = False
+            result._scalars[0] = 0  # Set success=False via underlying storage
             if is_recovery:
                 result.violations = (
                     f"J{idx + 1} moving further into danger zone (recovery blocked)"

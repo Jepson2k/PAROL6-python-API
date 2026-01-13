@@ -1468,6 +1468,16 @@ def main():
         datefmt="%H:%M:%S",
     )
 
+    third_party_log_level = log_level if log_level >= logging.INFO else logging.INFO
+    # Silence toppra's verbose debug output
+    logging.getLogger("toppra").setLevel(third_party_log_level)
+    logging.getLogger("numba").setLevel(third_party_log_level)
+
+    # Pre-compile numba JIT functions to avoid mid-loop compilation stalls
+    from parol6.utils.warmup import warmup_jit
+
+    warmup_jit()
+
     # Create configuration (env vars may override defaults)
     env_host = os.getenv("PAROL6_CONTROLLER_IP")
     env_port = os.getenv("PAROL6_CONTROLLER_PORT")

@@ -330,6 +330,15 @@ class StreamingExecutor(RuckigExecutorBase):
             self._acc_scale = 1.0
             self._apply_limits()
 
+    def reset(self) -> None:
+        """Reset executor state."""
+        with self._lock:
+            self._vel_scale = 1.0
+            self._acc_scale = 1.0
+            self.active = False
+            self._cart_vel_limit = None
+            self._init_state()
+
     @property
     def current_position(self) -> list[float]:
         """Get current position state in radians."""
@@ -450,7 +459,9 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             current_pose: Current TCP pose as SE3
         """
         with self._lock:
-            self.reference_pose = current_pose
+            self.reference_pose = (
+                current_pose.copy()
+            )  # Copy to avoid aliasing with cached FK
             # Reset Ruckig state to origin (relative to reference)
             self.inp.current_position = [0.0] * 6
             self.inp.current_velocity = [0.0] * 6

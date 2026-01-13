@@ -239,6 +239,12 @@ class ControllerState:
         self._fkine_last_pos_in.fill(0)
         self._fkine_last_tool = ""
 
+        # Reset streaming executors (clears reference_pose and Ruckig state)
+        if self.streaming_executor is not None:
+            self.streaming_executor.reset()
+        if self.cartesian_streaming_executor is not None:
+            self.cartesian_streaming_executor.reset()
+
         logger.debug("Controller state reset (preserving connection)")
 
     @property

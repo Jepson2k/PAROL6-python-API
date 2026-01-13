@@ -36,9 +36,6 @@ from parol6.utils.se3_utils import se3_from_rpy
 if TYPE_CHECKING:
     import sophuspy as sp
 
-# Silence toppra's verbose debug output
-logging.getLogger("toppra").setLevel(logging.INFO)
-
 logger = logging.getLogger(__name__)
 
 
