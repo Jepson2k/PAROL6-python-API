@@ -158,7 +158,20 @@ class MockSerialProcessAdapter:
 
             # Wait for first frame
             if not self._wait_for_first_frame(timeout=2.0):
-                logger.error("MockSerial subprocess did not produce first frame")
+                # Check if subprocess died (multiprocessing.Process uses is_alive/exitcode)
+                if self._process is not None:
+                    if not self._process.is_alive():
+                        logger.error(
+                            "MockSerial subprocess died with exit code %s before producing first frame",
+                            self._process.exitcode,
+                        )
+                    else:
+                        logger.error(
+                            "MockSerial subprocess did not produce first frame within timeout (still running, PID=%d)",
+                            self._process.pid,
+                        )
+                else:
+                    logger.error("MockSerial subprocess did not produce first frame")
                 self._cleanup()
                 return False
 
@@ -181,6 +194,13 @@ class MockSerialProcessAdapter:
         """Wait for the subprocess to produce its first frame."""
         deadline = time.time() + timeout
         while time.time() < deadline:
+            # Check if subprocess crashed (multiprocessing.Process uses is_alive/exitcode)
+            if self._process is not None and not self._process.is_alive():
+                exit_code = self._process.exitcode
+                logger.warning(
+                    "MockSerial subprocess exited early with code %s", exit_code
+                )
+                return False
             if self._rx_mv:
                 version, _ = unpack_rx_header(self._rx_mv)
                 if version > 0:

@@ -102,58 +102,86 @@ def mock_serial_worker_main(
         deg_to_steps_ratios: Conversion ratios for deg to steps
         interval_s: Control loop interval (default 4ms for 250 Hz)
     """
-    # Attach to shared memory
-    rx_shm = attach_shm(rx_shm_name)
-    tx_shm = attach_shm(tx_shm_name)
-    assert rx_shm.buf is not None
-    assert tx_shm.buf is not None
-    rx_mv = memoryview(rx_shm.buf)
-    tx_mv = memoryview(tx_shm.buf)
+    import sys
+    import traceback
 
-    # Initialize robot state
-    state = MockRobotState(update_rate=interval_s)
+    # Configure logging for subprocess (spawn creates fresh process without logging)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
+    sub_logger = logging.getLogger("parol6.mock_serial_subprocess")
+    sub_logger.info(
+        "MockSerial subprocess starting (rx=%s, tx=%s)", rx_shm_name, tx_shm_name
+    )
 
-    # Set initial positions to standby position
-    for i in range(6):
-        deg = float(standby_angles_deg[i])
-        steps = int(deg * deg_to_steps_ratios[i])
-        state.position_in[i] = steps
-    state.position_f = state.position_in.astype(np.float64)
-
-    # Ensure E-stop is not pressed
-    state.io_in[4] = 1
-
-    # Precompute motion simulation constants
-    vmax_f = velocity_limits_steps.astype(np.float64)
-    vmax_i32 = velocity_limits_steps.copy()
-    jmin_f = joint_limits_steps[:, 0].astype(np.float64)
-    jmax_f = joint_limits_steps[:, 1].astype(np.float64)
-
-    # Scratch buffers for motion simulation
-    prev_pos_f = np.zeros((6,), dtype=np.float64)
-    v_cmd_f = np.zeros((6,), dtype=np.float64)
-    new_pos_f = np.zeros((6,), dtype=np.float64)
-    realized_v = np.zeros((6,), dtype=np.int32)
-
-    # Frame buffer
-    frame_buf = bytearray(52)
-    frame_mv = memoryview(frame_buf)
-    frame_version = 0
-
-    # Timing
-    last_cmd_seq = 0
-    next_deadline = time.perf_counter()
-    state.last_update = next_deadline
-
-    # Command codes
-    CMD_IDLE = 0
-    CMD_HOME = 100
-    CMD_JOG = 123
-    CMD_MOVE = 156
-
-    logger.info("MockSerial subprocess started")
+    # Initialize variables for finally block
+    rx_shm = None
+    tx_shm = None
+    rx_mv = None
+    tx_mv = None
+    frame_mv = None
 
     try:
+        # Attach to shared memory
+        sub_logger.debug("Attaching to RX shared memory: %s", rx_shm_name)
+        rx_shm = attach_shm(rx_shm_name)
+        sub_logger.debug("Attaching to TX shared memory: %s", tx_shm_name)
+        tx_shm = attach_shm(tx_shm_name)
+
+        if rx_shm.buf is None:
+            raise RuntimeError(f"RX shared memory buffer is None for {rx_shm_name}")
+        if tx_shm.buf is None:
+            raise RuntimeError(f"TX shared memory buffer is None for {tx_shm_name}")
+
+        rx_mv = memoryview(rx_shm.buf)
+        tx_mv = memoryview(tx_shm.buf)
+        sub_logger.debug("Shared memory attached successfully")
+
+        # Initialize robot state
+        state = MockRobotState(update_rate=interval_s)
+
+        # Set initial positions to standby position
+        for i in range(6):
+            deg = float(standby_angles_deg[i])
+            steps = int(deg * deg_to_steps_ratios[i])
+            state.position_in[i] = steps
+        state.position_f = state.position_in.astype(np.float64)
+
+        # Ensure E-stop is not pressed
+        state.io_in[4] = 1
+
+        # Precompute motion simulation constants
+        vmax_f = velocity_limits_steps.astype(np.float64)
+        vmax_i32 = velocity_limits_steps.copy()
+        jmin_f = joint_limits_steps[:, 0].astype(np.float64)
+        jmax_f = joint_limits_steps[:, 1].astype(np.float64)
+
+        # Scratch buffers for motion simulation
+        prev_pos_f = np.zeros((6,), dtype=np.float64)
+        v_cmd_f = np.zeros((6,), dtype=np.float64)
+        new_pos_f = np.zeros((6,), dtype=np.float64)
+        realized_v = np.zeros((6,), dtype=np.int32)
+
+        # Frame buffer
+        frame_buf = bytearray(52)
+        frame_mv = memoryview(frame_buf)
+        frame_version = 0
+
+        # Timing
+        last_cmd_seq = 0
+        next_deadline = time.perf_counter()
+        state.last_update = next_deadline
+
+        # Command codes
+        CMD_IDLE = 0
+        CMD_HOME = 100
+        CMD_JOG = 123
+        CMD_MOVE = 156
+
+        sub_logger.info("MockSerial subprocess initialized, entering main loop")
         while not shutdown_event.is_set():
             now = time.perf_counter()
 
@@ -275,25 +303,25 @@ def mock_serial_worker_main(
                     time.sleep(sleep_time)
 
     except Exception as e:
-        logger.exception("MockSerial subprocess error: %s", e)
+        sub_logger.exception("MockSerial subprocess error: %s", e)
+        # Also print to stderr directly in case logging isn't working
+        print(f"MockSerial subprocess FATAL ERROR: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
     finally:
         # Release memoryviews before closing shared memory to avoid BufferError
-        # memoryview.release() explicitly releases the buffer reference
-        try:
-            rx_mv.release()
-        except Exception:
-            pass
-        try:
-            tx_mv.release()
-        except Exception:
-            pass
-        try:
-            frame_mv.release()
-        except Exception:
-            pass
-        rx_shm.close()
-        tx_shm.close()
-        logger.info("MockSerial subprocess exiting")
+        for obj, method in [
+            (rx_mv, "release"),
+            (tx_mv, "release"),
+            (frame_mv, "release"),
+            (rx_shm, "close"),
+            (tx_shm, "close"),
+        ]:
+            if obj is not None:
+                try:
+                    getattr(obj, method)()
+                except Exception:
+                    pass
+        sub_logger.info("MockSerial subprocess exiting")
 
 
 def _encode_payload_into(out_mv: memoryview, state: MockRobotState) -> None:
