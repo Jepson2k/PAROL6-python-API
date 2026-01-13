@@ -208,7 +208,8 @@ def server_proc(request, ports: TestPorts, robot_api_env):
         )
 
         # Wait for server to be ready with custom ping logic
-        timeout = 10.0
+        # Needs to be long enough for JIT warmup (~7s) + MockSerial subprocess startup (~10s)
+        timeout = 30.0
         start_time = time.time()
 
         while time.time() - start_time < timeout:
