@@ -38,8 +38,22 @@ from parol6.protocol.wire import (
     fuse_3_bytes,
     split_to_3_bytes,
 )
-from parol6.server.controller import _arrays_dirty
+from parol6.server.status_cache import _update_arrays
+from parol6.server.ik_worker import (
+    _compute_joint_enable,
+    _compute_target_poses,
+    _AXIS_DIRS,
+)
 from parol6.utils.ik import _check_limits_core, _ik_safety_check, unwrap_angles
+from parol6.utils.se3_numba import (
+    se3_identity,
+    se3_from_trans,
+    se3_rx,
+    se3_ry,
+    se3_rz,
+    se3_mul,
+    se3_copy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,21 +126,39 @@ def warmup_jit() -> float:
     dummy_6f_out = np.zeros(6, dtype=np.float64)
     _transform_vel_wrf_to_body(dummy_3x3, dummy_6f, dummy_6f_out)
 
-    # parol6/server/controller.py
-    dummy_8 = np.zeros(8, dtype=np.int32)
-    dummy_2 = np.zeros(2, dtype=np.int32)
-    _arrays_dirty(
+    # parol6/server/status_cache.py
+    dummy_5u8 = np.zeros(5, dtype=np.uint8)
+    _update_arrays(
+        dummy_6i,
+        dummy_5u8,
         dummy_6i,
         dummy_6i,
         dummy_6i,
+        dummy_6f,
+        dummy_6f,
+        dummy_5u8,
         dummy_6i,
         dummy_6i,
-        dummy_6i,
-        dummy_8,
-        dummy_8,
-        dummy_2,
-        dummy_2,
     )
+
+    # parol6/utils/se3_numba.py
+    dummy_4x4 = np.zeros((4, 4), dtype=np.float64)
+    dummy_4x4_b = np.zeros((4, 4), dtype=np.float64)
+    dummy_4x4_out = np.zeros((4, 4), dtype=np.float64)
+    se3_identity(dummy_4x4)
+    se3_from_trans(0.0, 0.0, 0.0, dummy_4x4)
+    se3_rx(0.0, dummy_4x4)
+    se3_ry(0.0, dummy_4x4)
+    se3_rz(0.0, dummy_4x4)
+    se3_mul(dummy_4x4, dummy_4x4_b, dummy_4x4_out)
+    se3_copy(dummy_4x4, dummy_4x4_b)
+
+    # parol6/server/ik_worker.py
+    dummy_qlim = np.zeros((2, 6), dtype=np.float64)
+    dummy_12u8 = np.zeros(12, dtype=np.uint8)
+    _compute_joint_enable(dummy_6f, dummy_qlim, dummy_12u8)
+    dummy_targets = np.zeros((12, 4, 4), dtype=np.float64)
+    _compute_target_poses(dummy_4x4, 0.001, 0.01, True, _AXIS_DIRS, dummy_targets)
 
     elapsed = time.perf_counter() - start
     logger.info(f"\tJIT warmup completed in {elapsed * 1000:.1f}ms")

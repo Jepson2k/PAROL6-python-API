@@ -6,6 +6,7 @@ communicating with the main controller via shared memory.
 """
 
 import logging
+import signal
 import time
 from dataclasses import dataclass, field
 from multiprocessing.synchronize import Event
@@ -104,6 +105,9 @@ def mock_serial_worker_main(
     """
     import sys
     import traceback
+
+    # Ignore SIGINT in worker - main process handles shutdown via shutdown_event
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # Configure logging for subprocess (spawn creates fresh process without logging)
     logging.basicConfig(

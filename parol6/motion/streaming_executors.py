@@ -160,6 +160,21 @@ class StreamingExecutor(RuckigExecutorBase):
         # Must be set before super().__init__ calls _init_limits/_init_state
         self._cart_vel_limit: float | None = None
 
+        # Pre-allocated buffers for cart velocity limit calculations (avoids per-call allocations)
+        self._q_current_buf = np.zeros(num_dofs, dtype=np.float64)
+        self._q_target_buf = np.zeros(num_dofs, dtype=np.float64)
+        self._dq_buf = np.zeros(num_dofs, dtype=np.float64)
+
+        # Pre-allocated buffers for Ruckig parameters - each has ONE semantic purpose
+        # Position sync (current/target position share same values)
+        self._sync_pos_buf: list[float] = [0.0] * num_dofs
+        # Limit parameters (max_velocity, max_acceleration, max_jerk)
+        self._max_vel_buf: list[float] = [0.0] * num_dofs
+        self._max_acc_buf: list[float] = [0.0] * num_dofs
+        self._max_jerk_buf: list[float] = [0.0] * num_dofs
+        # Target velocity for jogging
+        self._target_vel_buf: list[float] = [0.0] * num_dofs
+
         super().__init__(num_dofs, dt)
 
     def _init_limits(self) -> None:
@@ -182,9 +197,13 @@ class StreamingExecutor(RuckigExecutorBase):
 
     def _apply_limits(self) -> None:
         """Apply current limits (with scaling) to Ruckig parameters."""
-        self.inp.max_velocity = list(self._hardware_v_max * self._vel_scale)
-        self.inp.max_acceleration = list(self._hardware_a_max * self._acc_scale)
-        self.inp.max_jerk = list(self._hardware_j_max)
+        for i in range(self.num_dofs):
+            self._max_vel_buf[i] = self._hardware_v_max[i] * self._vel_scale
+            self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
+            self._max_jerk_buf[i] = self._hardware_j_max[i]
+        self.inp.max_velocity = self._max_vel_buf
+        self.inp.max_acceleration = self._max_acc_buf
+        self.inp.max_jerk = self._max_jerk_buf
 
     def set_cart_velocity_limit(self, limit_mm_s: float | None) -> None:
         """
@@ -210,10 +229,13 @@ class StreamingExecutor(RuckigExecutorBase):
         """
         with self._lock:
             if not self.active:
-                self.inp.current_position = list(pos)
-                self.inp.current_velocity = [0.0] * self.num_dofs
-                self.inp.current_acceleration = [0.0] * self.num_dofs
-                self.inp.target_position = list(pos)
+                self._sync_pos_buf[:] = pos
+                self.inp.current_position = self._sync_pos_buf
+                self.inp.current_velocity = (
+                    self._zeros
+                )  # Constant zeros buffer from base
+                self.inp.current_acceleration = self._zeros
+                self.inp.target_position = self._sync_pos_buf
 
     def set_position_target(self, q_target: list[float]) -> None:
         """
@@ -231,12 +253,14 @@ class StreamingExecutor(RuckigExecutorBase):
             if self._cart_vel_limit is not None and self._cart_vel_limit > 0:
                 self._apply_cart_velocity_limit(q_target)
             else:
-                # Reset to hardware limits
-                self.inp.max_velocity = list(self._hardware_v_max)
+                # Reset to hardware limits (reuse buffer)
+                self._max_vel_buf[:] = self._hardware_v_max
+                self.inp.max_velocity = self._max_vel_buf
 
             self.inp.control_interface = ControlInterface.Position
-            self.inp.target_position = list(q_target)
-            self.inp.target_velocity = [0.0] * self.num_dofs  # Stop at target
+            self._sync_pos_buf[:] = q_target
+            self.inp.target_position = self._sync_pos_buf
+            self.inp.target_velocity = self._zeros  # Stop at target
             self.active = True
 
     def set_jog_velocity(self, joint_velocities: list[float]) -> None:
@@ -250,13 +274,17 @@ class StreamingExecutor(RuckigExecutorBase):
             joint_velocities: Desired velocity for each joint in rad/s (signed)
         """
         with self._lock:
-            # Use jog-specific velocity limits (~80% of hardware limits)
-            self.inp.max_velocity = list(self._jog_v_max * self._vel_scale)
-            self.inp.max_acceleration = list(self._hardware_a_max * self._acc_scale)
+            # Use jog-specific velocity limits (~80% of hardware limits) - reuse buffers
+            for i in range(self.num_dofs):
+                self._max_vel_buf[i] = self._jog_v_max[i] * self._vel_scale
+                self._max_acc_buf[i] = self._hardware_a_max[i] * self._acc_scale
+            self.inp.max_velocity = self._max_vel_buf
+            self.inp.max_acceleration = self._max_acc_buf
 
             self.inp.control_interface = ControlInterface.Velocity
-            self.inp.target_velocity = list(joint_velocities)
-            self.inp.target_acceleration = [0.0] * self.num_dofs
+            self._target_vel_buf[:] = joint_velocities
+            self.inp.target_velocity = self._target_vel_buf
+            self.inp.target_acceleration = self._zeros
             self.active = True
 
     def _apply_cart_velocity_limit(self, q_target: list[float]) -> None:
@@ -267,16 +295,17 @@ class StreamingExecutor(RuckigExecutorBase):
         ensure TCP velocity along the direction to target stays within the
         Cartesian velocity limit.
         """
-        q_current = np.array(self.inp.current_position)
-        q_tgt = np.array(q_target)
-        dq = q_tgt - q_current
+        # Use pre-allocated buffers to avoid allocations
+        self._q_current_buf[:] = self.inp.current_position
+        self._q_target_buf[:] = q_target
+        np.subtract(self._q_target_buf, self._q_current_buf, out=self._dq_buf)
 
         # Get the linear part of the Jacobian (first 3 rows)
         assert PAROL6_ROBOT.robot is not None
-        J_lin = PAROL6_ROBOT.robot.jacob0(q_current)[:3, :]
+        J_lin = PAROL6_ROBOT.robot.jacob0(self._q_current_buf)[:3, :]
 
         # Compute Cartesian velocity per unit "scale" along dq direction
-        cart_vel_per_scale = np.linalg.norm(J_lin @ dq)
+        cart_vel_per_scale = np.linalg.norm(J_lin @ self._dq_buf)
 
         if cart_vel_per_scale > 1e-6:
             v_max_m_s = (
@@ -284,18 +313,20 @@ class StreamingExecutor(RuckigExecutorBase):
             )  # mm/s to m/s
             max_scale = v_max_m_s / cart_vel_per_scale
 
-            v_max_limited = []
+            # Reuse pre-allocated buffer for velocity limits
             for j in range(self.num_dofs):
                 # Joint velocity = dq[j] * scale, so max joint vel = |dq[j]| * max_scale
-                q_dot_max = min(abs(dq[j]) * max_scale, self._hardware_v_max[j])
+                q_dot_max = min(
+                    abs(self._dq_buf[j]) * max_scale, self._hardware_v_max[j]
+                )
                 # Ensure non-zero minimum to avoid Ruckig issues
-                q_dot_max = max(q_dot_max, 1e-6)
-                v_max_limited.append(q_dot_max)
+                self._max_vel_buf[j] = max(q_dot_max, 1e-6)
 
-            self.inp.max_velocity = v_max_limited
+            self.inp.max_velocity = self._max_vel_buf
         else:
-            # Near-zero motion, use hardware limits
-            self.inp.max_velocity = list(self._hardware_v_max)
+            # Near-zero motion, use hardware limits (reuse buffer)
+            self._max_vel_buf[:] = self._hardware_v_max
+            self.inp.max_velocity = self._max_vel_buf
 
     def tick(self) -> tuple[list[float], list[float], bool]:
         """

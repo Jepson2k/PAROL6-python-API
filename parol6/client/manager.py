@@ -111,7 +111,7 @@ class ServerManager:
         )
 
         # Launch the controller as a module to ensure package imports resolve
-        args = [sys.executable, "-u", "-m", "parol6.server.controller"]
+        args = [sys.executable, "-u", "-m", "parol6.server.cli"]
 
         # Decide controller log level:
         # - If PAROL_TRACE is set in the environment, prefer TRACE for the child

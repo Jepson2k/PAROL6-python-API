@@ -223,15 +223,22 @@ class MockSerialProcessAdapter:
         if self._shutdown_event:
             self._shutdown_event.set()
 
-        # Wait for process to exit
-        if self._process and self._process.is_alive():
-            self._process.join(timeout=2.0)
+        # Wait for process to fully exit (not just join - ensure it's completely done)
+        if self._process is not None:
             if self._process.is_alive():
-                logger.warning(
-                    "MockSerial subprocess did not exit cleanly, terminating"
-                )
-                self._process.terminate()
-                self._process.join(timeout=1.0)
+                self._process.join(timeout=2.0)
+                if self._process.is_alive():
+                    logger.warning(
+                        "MockSerial subprocess did not exit cleanly, terminating"
+                    )
+                    self._process.terminate()
+                    self._process.join(timeout=1.0)
+
+            # Wait for exitcode to be set (indicates process fully terminated)
+            # This ensures the subprocess's finally block has completed
+            deadline = time.time() + 1.0
+            while self._process.exitcode is None and time.time() < deadline:
+                time.sleep(0.01)
 
         self._process = None
         self._shutdown_event = None

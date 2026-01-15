@@ -10,8 +10,15 @@ All commands produce a JointPath that gets converted to a Trajectory
 via time-optimal path parameterization (TOPP-RA).
 
 Streaming executors provide real-time jerk-limited motion for jogging.
+
+Geometry generators provide path geometry for visualization and preview.
 """
 
+from parol6.motion.geometry import (
+    CircularMotion,
+    SplineMotion,
+    joint_path_to_tcp_poses,
+)
 from parol6.motion.streaming_executors import (
     CartesianStreamingExecutor,
     RuckigExecutorBase,
@@ -25,11 +32,17 @@ from parol6.motion.trajectory import (
 )
 
 __all__ = [
+    # Trajectory pipeline
     "JointPath",
     "Trajectory",
     "TrajectoryBuilder",
     "ProfileType",
+    # Streaming executors
     "StreamingExecutor",
     "CartesianStreamingExecutor",
     "RuckigExecutorBase",
+    # Geometry generators
+    "CircularMotion",
+    "SplineMotion",
+    "joint_path_to_tcp_poses",
 ]

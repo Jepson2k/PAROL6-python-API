@@ -398,20 +398,19 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         assert PAROL6_ROBOT.robot is not None
         T_raw = cast(Any, PAROL6_ROBOT.robot).fkine(state._fkine_q_rad)
 
-        # Cache as 4x4 matrix first (fkine returns spatialmath SE3, extract .A)
-        mat = np.asarray(T_raw.A, dtype=np.float64).copy()
-        np.copyto(state._fkine_mat, mat)
+        # Cache as 4x4 matrix (zero-allocation: copy directly into pre-allocated buffer)
+        np.copyto(state._fkine_mat, T_raw.A)
 
         # Update sophuspy SE3 in-place (avoids allocation vs creating new SE3)
-        state._fkine_se3.setRotationMatrix(mat[:3, :3])
-        state._fkine_se3.setTranslation(mat[:3, 3])
+        state._fkine_se3.setRotationMatrix(state._fkine_mat[:3, :3])
+        state._fkine_se3.setTranslation(state._fkine_mat[:3, 3])
 
-        # Cache as flattened 16-vector with mm translation
-        flat = mat.reshape(-1).copy()
-        flat[3] *= 1000.0  # X translation to mm
-        flat[7] *= 1000.0  # Y translation to mm
-        flat[11] *= 1000.0  # Z translation to mm
-        np.copyto(state._fkine_flat_mm, flat)
+        # Cache as flattened 16-vector with mm translation (zero-allocation)
+        # Use flat view of _fkine_mat, then copy with scaling into _fkine_flat_mm
+        state._fkine_flat_mm[:] = state._fkine_mat.ravel()
+        state._fkine_flat_mm[3] *= 1000.0  # X translation to mm
+        state._fkine_flat_mm[7] *= 1000.0  # Y translation to mm
+        state._fkine_flat_mm[11] *= 1000.0  # Z translation to mm
 
         # Update cache tracking
         np.copyto(state._fkine_last_pos_in, state.Position_in)

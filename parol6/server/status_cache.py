@@ -9,11 +9,48 @@ import threading
 import time
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike
 
 from parol6.config import steps_to_deg, steps_to_rad
 from parol6.server.ik_worker_client import IKWorkerClient
 from parol6.server.state import ControllerState, get_fkine_flat_mm, get_fkine_matrix
+
+
+@njit(cache=True)
+def _update_arrays(
+    pos_in: np.ndarray,
+    io_in: np.ndarray,
+    spd_in: np.ndarray,
+    grip_in: np.ndarray,
+    pos_last: np.ndarray,
+    angles_deg: np.ndarray,
+    q_rad_buf: np.ndarray,
+    io_cached: np.ndarray,
+    spd_cached: np.ndarray,
+    grip_cached: np.ndarray,
+) -> tuple[bool, bool, bool, bool]:
+    """
+    Check for changes and update cached arrays.
+    Returns (pos_changed, io_changed, spd_changed, grip_changed).
+    """
+    pos_changed = not np.array_equal(pos_in, pos_last)
+    io_changed = not np.array_equal(io_in, io_cached)
+    spd_changed = not np.array_equal(spd_in, spd_cached)
+    grip_changed = not np.array_equal(grip_in, grip_cached)
+
+    if pos_changed:
+        pos_last[:] = pos_in
+        steps_to_deg(pos_in, angles_deg)
+        steps_to_rad(pos_in, q_rad_buf)
+    if io_changed:
+        io_cached[:] = io_in
+    if spd_changed:
+        spd_cached[:] = spd_in
+    if grip_changed:
+        grip_cached[:] = grip_in
+
+    return pos_changed, io_changed, spd_changed, grip_changed
 
 
 class StatusCache:
@@ -77,6 +114,10 @@ class StatusCache:
 
         # Change-detection caches to avoid expensive recomputation when inputs unchanged
         self._last_pos_in: np.ndarray = np.zeros((6,), dtype=np.int32)
+        self._last_io_buf: np.ndarray = np.zeros((5,), dtype=np.uint8)
+
+        # Pre-allocated buffer for IK request (avoids allocation per position change)
+        self._q_rad_buf: np.ndarray = np.zeros(6, dtype=np.float64)
 
         # IK worker client for async enablement computation (lazy-started on first request)
         self._ik_client = IKWorkerClient()
@@ -100,20 +141,30 @@ class StatusCache:
         changed_any = False
 
         with self._lock:
-            # Check if position or tool changed
-            tool_changed = state.current_tool != self._last_tool_name
-            pos_changed = self._last_pos_in is None or not np.array_equal(
-                state.Position_in, self._last_pos_in
+            # Copy IO slice to contiguous buffer for numba
+            np.copyto(self._last_io_buf, state.InOut_in[:5])
+
+            # Check and update all arrays in one numba call
+            pos_changed, io_changed, spd_changed, grip_changed = _update_arrays(
+                state.Position_in,
+                self._last_io_buf,
+                state.Speed_in,
+                state.Gripper_data_in,
+                self._last_pos_in,
+                self.angles_deg,
+                self._q_rad_buf,
+                self.io,
+                self.speeds,
+                self.gripper,
             )
 
+            # Check if tool changed
+            tool_changed = state.current_tool != self._last_tool_name
+
             if pos_changed or tool_changed:
-                if pos_changed:
-                    np.copyto(self._last_pos_in, state.Position_in)
                 if tool_changed:
                     self._last_tool_name = state.current_tool
 
-                # Vectorized steps->deg
-                steps_to_deg(state.Position_in, self.angles_deg)
                 self._angles_ascii = self._format_csv_from_list(self.angles_deg)
                 changed_any = True
 
@@ -121,23 +172,20 @@ class StatusCache:
                 pose_flat_mm = get_fkine_flat_mm(state)
                 np.copyto(self.pose, pose_flat_mm)
                 self._pose_ascii = self._format_csv_from_list(self.pose)
-                changed_any = True
 
                 # Submit IK request asynchronously
                 try:
-                    q_rad = np.zeros(6, dtype=np.float64)
-                    steps_to_rad(state.Position_in, q_rad)
                     T_matrix = get_fkine_matrix(state)
-                    self._ik_client.submit_request(q_rad, T_matrix)
+                    self._ik_client.submit_request(self._q_rad_buf, T_matrix)
                 except Exception:
                     pass  # IK request failed, will use cached values
 
             # Poll for async IK results (non-blocking)
             results = self._ik_client.get_results_if_ready()
             if results is not None:
-                self.joint_en[:] = results[0]
-                self.cart_en_wrf[:] = results[1]
-                self.cart_en_trf[:] = results[2]
+                np.copyto(self.joint_en, results[0])
+                np.copyto(self.cart_en_wrf, results[1])
+                np.copyto(self.cart_en_trf, results[2])
                 self._joint_en_ascii = self._format_csv_from_list(
                     self.joint_en.tolist()
                 )
@@ -149,21 +197,15 @@ class StatusCache:
                 )
                 changed_any = True
 
-            # 2) IO (first 5)
-            if not np.array_equal(self.io, state.InOut_in[:5]):
-                np.copyto(self.io, state.InOut_in[:5])
+            if io_changed:
                 self._io_ascii = self._format_csv_from_list(self.io)
                 changed_any = True
 
-            # 3) Speeds (steps/sec from Speed_in)
-            if not np.array_equal(self.speeds, state.Speed_in):
-                np.copyto(self.speeds, state.Speed_in)
+            if spd_changed:
                 self._speeds_ascii = self._format_csv_from_list(self.speeds)
                 changed_any = True
 
-            # 4) Gripper
-            if not np.array_equal(self.gripper, state.Gripper_data_in):
-                np.copyto(self.gripper, state.Gripper_data_in)
+            if grip_changed:
                 self._gripper_ascii = self._format_csv_from_list(self.gripper)
                 changed_any = True
 
