@@ -6,15 +6,23 @@ in a separate process, communicating with the main process via shared memory.
 """
 
 import logging
-import math
-import time
+import signal
 from multiprocessing.synchronize import Event
 
 import numpy as np
 import sophuspy as sp
+from numba import njit  # type: ignore[import-untyped]
+
+from parol6.utils.se3_numba import (
+    se3_from_trans,
+    se3_mul,
+    se3_rx,
+    se3_ry,
+    se3_rz,
+)
+
 
 from parol6.server.ipc import (
-    IKInputLayout,
     attach_shm,
     pack_ik_response,
     unpack_ik_request,
@@ -27,19 +35,23 @@ def ik_enablement_worker_main(
     input_shm_name: str,
     output_shm_name: str,
     shutdown_event: Event,
+    request_event: Event,
 ) -> None:
     """
     Main entry point for IK enablement worker subprocess.
 
-    This worker monitors the input shared memory for new requests,
-    computes joint and cartesian enablement, and writes results to
-    the output shared memory.
+    This worker waits for request signals, computes joint and cartesian
+    enablement, and writes results to the output shared memory.
 
     Args:
         input_shm_name: Name of input shared memory segment
         output_shm_name: Name of output shared memory segment
         shutdown_event: Event to signal shutdown
+        request_event: Event signaled when new request is available
     """
+    # Ignore SIGINT in worker - main process handles shutdown via shutdown_event
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     # Attach to shared memory
     input_shm = attach_shm(input_shm_name)
     output_shm = attach_shm(output_shm_name)
@@ -50,74 +62,65 @@ def ik_enablement_worker_main(
 
     # Initialize robot model in this process
     import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-    from parol6.utils.ik import AXIS_MAP, solve_ik
-    from parol6.utils.se3_utils import (
-        se3_from_matrix,
-        se3_from_trans,
-        se3_rx,
-        se3_ry,
-        se3_rz,
-    )
+    from parol6.utils.ik import solve_ik
 
     robot = PAROL6_ROBOT.robot
     assert robot is not None
     qlim = robot.qlim
 
-    last_req_seq = 0
+    response_version = 0
+
+    # Pre-allocate output arrays for zero-allocation in loop
+    joint_en = np.ones(12, dtype=np.uint8)
+    cart_en_wrf = np.ones(12, dtype=np.uint8)
+    cart_en_trf = np.ones(12, dtype=np.uint8)
+    cart_targets = np.zeros((12, 4, 4), dtype=np.float64)
 
     logger.info("IK worker subprocess started")
 
     try:
         while not shutdown_event.is_set():
-            # Read request sequence number (cheap check)
-            req_seq = np.frombuffer(
-                input_mv[
-                    IKInputLayout.REQ_SEQ_OFFSET : IKInputLayout.REQ_SEQ_OFFSET + 8
-                ],
-                dtype=np.uint64,
-            )[0]
+            # Wait for request signal or timeout for shutdown check
+            if not request_event.wait(timeout=0.1):
+                continue  # Timeout - loop back to check shutdown
 
-            if req_seq != last_req_seq and req_seq > 0:
-                # New request - read inputs
-                q_rad, T_matrix, _, flags = unpack_ik_request(input_mv)
+            request_event.clear()
 
-                # Reconstruct SE3 from matrix
-                T = se3_from_matrix(T_matrix)
+            # Read inputs from shared memory
+            q_rad, T_matrix = unpack_ik_request(input_mv)
 
-                # Compute enablement
-                joint_en = _compute_joint_enable(q_rad, qlim)
-                cart_en_wrf = _compute_cart_enable(
-                    T,
-                    "WRF",
-                    q_rad,
-                    robot,
-                    solve_ik,
-                    AXIS_MAP,
-                    se3_from_trans,
-                    se3_rx,
-                    se3_ry,
-                    se3_rz,
-                )
-                cart_en_trf = _compute_cart_enable(
-                    T,
-                    "TRF",
-                    q_rad,
-                    robot,
-                    solve_ik,
-                    AXIS_MAP,
-                    se3_from_trans,
-                    se3_rx,
-                    se3_ry,
-                    se3_rz,
-                )
+            # Compute joint enablement
+            if qlim is not None:
+                _compute_joint_enable(q_rad, qlim, joint_en)
+            # else: joint_en stays all ones (pre-allocated default)
 
-                # Write results
-                pack_ik_response(output_mv, joint_en, cart_en_wrf, cart_en_trf, req_seq)
+            # Compute cartesian enablement for both frames
+            _compute_cart_enable(
+                T_matrix,
+                True,
+                q_rad,
+                robot,
+                solve_ik,
+                _AXIS_DIRS,
+                cart_targets,
+                cart_en_wrf,
+            )
+            _compute_cart_enable(
+                T_matrix,
+                False,
+                q_rad,
+                robot,
+                solve_ik,
+                _AXIS_DIRS,
+                cart_targets,
+                cart_en_trf,
+            )
 
-                last_req_seq = req_seq
-            else:
-                # No new request, sleep briefly
-                time.sleep(0.001)
+            # Write results with incremented version
+            response_version += 1
+            pack_ik_response(
+                output_mv, joint_en, cart_en_wrf, cart_en_trf, response_version
+            )
 
     except Exception as e:
         logger.exception("IK worker subprocess error: %s", e)
@@ -136,85 +139,118 @@ def ik_enablement_worker_main(
         logger.info("IK worker subprocess exiting")
 
 
+@njit(cache=True)
 def _compute_joint_enable(
     q_rad: np.ndarray,
     qlim: np.ndarray,
-    delta_rad: float = math.radians(0.2),
-) -> np.ndarray:
+    out: np.ndarray,
+    delta_rad: float = np.radians(0.2),
+) -> None:
     """
     Compute per-joint +/- enable bits based on joint limits and a small delta.
 
-    Returns 12-element array: [J1+, J1-, J2+, J2-, ..., J6+, J6-]
+    Writes to out array (12 elements): [J1+, J1-, J2+, J2-, ..., J6+, J6-]
     """
-    if qlim is None:
-        return np.ones(12, dtype=np.uint8)
-
-    allow_plus = (q_rad + delta_rad) <= qlim[1, :]
-    allow_minus = (q_rad - delta_rad) >= qlim[0, :]
-
-    bits = np.zeros(12, dtype=np.uint8)
     for i in range(6):
-        bits[i * 2] = 1 if allow_plus[i] else 0
-        bits[i * 2 + 1] = 1 if allow_minus[i] else 0
+        out[i * 2] = 1 if (q_rad[i] + delta_rad) <= qlim[1, i] else 0
+        out[i * 2 + 1] = 1 if (q_rad[i] - delta_rad) >= qlim[0, i] else 0
 
-    return bits
+
+# Axis directions: [dx, dy, dz, rx, ry, rz] for each of 12 axes
+# Order: X+, X-, Y+, Y-, Z+, Z-, RX+, RX-, RY+, RY-, RZ+, RZ-
+_AXIS_DIRS = np.array(
+    [
+        [1, 0, 0, 0, 0, 0],  # X+
+        [-1, 0, 0, 0, 0, 0],  # X-
+        [0, 1, 0, 0, 0, 0],  # Y+
+        [0, -1, 0, 0, 0, 0],  # Y-
+        [0, 0, 1, 0, 0, 0],  # Z+
+        [0, 0, -1, 0, 0, 0],  # Z-
+        [0, 0, 0, 1, 0, 0],  # RX+
+        [0, 0, 0, -1, 0, 0],  # RX-
+        [0, 0, 0, 0, 1, 0],  # RY+
+        [0, 0, 0, 0, -1, 0],  # RY-
+        [0, 0, 0, 0, 0, 1],  # RZ+
+        [0, 0, 0, 0, 0, -1],  # RZ-
+    ],
+    dtype=np.float64,
+)
+
+
+@njit(cache=True)
+def _compute_target_poses(
+    T: np.ndarray,
+    t_step: float,
+    r_step: float,
+    is_wrf: bool,
+    axis_dirs: np.ndarray,
+    targets: np.ndarray,
+) -> None:
+    """
+    Compute 12 target poses for cartesian enablement checking.
+
+    Args:
+        T: Current pose (4x4 matrix)
+        t_step: Translation step in meters
+        r_step: Rotation step in radians
+        is_wrf: True for world reference frame, False for tool reference frame
+        axis_dirs: (12, 6) array of axis directions [dx, dy, dz, rx, ry, rz]
+        targets: Output array (12, 4, 4) for target poses
+    """
+    dT = np.zeros((4, 4), dtype=np.float64)
+
+    for i in range(12):
+        d = axis_dirs[i]
+        dx, dy, dz = d[0] * t_step, d[1] * t_step, d[2] * t_step
+        rx, ry, rz = d[3] * r_step, d[4] * r_step, d[5] * r_step
+
+        # Build delta transform (only one of trans/rot is non-zero per axis)
+        if dx != 0.0 or dy != 0.0 or dz != 0.0:
+            se3_from_trans(dx, dy, dz, dT)
+        elif rx != 0.0:
+            se3_rx(rx, dT)
+        elif ry != 0.0:
+            se3_ry(ry, dT)
+        elif rz != 0.0:
+            se3_rz(rz, dT)
+
+        # Apply in specified frame
+        if is_wrf:
+            se3_mul(dT, T, targets[i])
+        else:
+            se3_mul(T, dT, targets[i])
 
 
 def _compute_cart_enable(
-    T: sp.SE3,
-    frame: str,
+    T: np.ndarray,
+    is_wrf: bool,
     q_rad: np.ndarray,
     robot,
     solve_ik,
-    axis_map: dict,
-    se3_from_trans,
-    se3_rx,
-    se3_ry,
-    se3_rz,
+    axis_dirs: np.ndarray,
+    targets: np.ndarray,
+    out: np.ndarray,
     delta_mm: float = 0.5,
     delta_deg: float = 0.5,
-) -> np.ndarray:
+) -> None:
     """
-    Compute per-axis +/- enable bits for the given frame (WRF/TRF) via small-step IK.
+    Compute per-axis +/- enable bits for the given frame via small-step IK.
 
-    Returns 12-element array for the 12 axes in AXIS_MAP order.
+    Writes to out array (12 elements) in axis order:
+    X+, X-, Y+, Y-, Z+, Z-, RX+, RX-, RY+, RY-, RZ+, RZ-
     """
-    bits = []
-    t_step_m = delta_mm / 1000.0
-    r_step_rad = math.radians(delta_deg)
+    t_step = delta_mm / 1000.0
+    r_step = np.radians(delta_deg)
 
-    for axis, (v_lin, v_rot) in axis_map.items():
-        # Compose delta SE3 for this axis
-        dT = sp.SE3()
+    # Compute all 12 target poses in one numba call
+    _compute_target_poses(T, t_step, r_step, is_wrf, axis_dirs, targets)
 
-        # Translation
-        dx = v_lin[0] * t_step_m
-        dy = v_lin[1] * t_step_m
-        dz = v_lin[2] * t_step_m
-        if abs(dx) > 0 or abs(dy) > 0 or abs(dz) > 0:
-            dT = dT * se3_from_trans(dx, dy, dz)
-
-        # Rotation
-        rx = v_rot[0] * r_step_rad
-        ry = v_rot[1] * r_step_rad
-        rz = v_rot[2] * r_step_rad
-        if abs(rx) > 0:
-            dT = dT * se3_rx(rx)
-        if abs(ry) > 0:
-            dT = dT * se3_ry(ry)
-        if abs(rz) > 0:
-            dT = dT * se3_rz(rz)
-
-        # Apply in specified frame
-        if frame == "WRF":
-            T_target = dT * T
-        else:  # TRF
-            T_target = T * dT
-
+    # Check IK for each target
+    for i in range(12):
         try:
-            ik = solve_ik(robot, T_target, q_rad, quiet_logging=True)
-            bits.append(1 if ik.success else 0)
+            # Convert numpy 4x4 matrix to sp.SE3 for solve_ik
+            target_se3 = sp.SE3(targets[i])
+            ik = solve_ik(robot, target_se3, q_rad, quiet_logging=True)
+            out[i] = 1 if ik.success else 0
         except Exception:
-            bits.append(0)
-
-    return np.array(bits, dtype=np.uint8)
+            out[i] = 0

@@ -18,7 +18,6 @@ from parol6.server.ipc import (
     IK_OUTPUT_SHM_SIZE,
     cleanup_shm,
     create_shm,
-    get_ik_resp_seq,
     pack_ik_request,
     unpack_ik_response,
 )
@@ -43,9 +42,9 @@ class IKWorkerClient:
         self._output_mv: memoryview | None = None
         self._process: Process | None = None
         self._shutdown_event: Event | None = None
+        self._request_event: Event | None = None
 
-        self._last_req_seq = 0
-        self._last_resp_seq = 0
+        self._last_resp_version = 0
         self._started = False
 
         # Unique names for shared memory segments
@@ -83,9 +82,15 @@ class IKWorkerClient:
 
             # Spawn subprocess
             self._shutdown_event = multiprocessing.Event()
+            self._request_event = multiprocessing.Event()
             self._process = Process(
                 target=ik_enablement_worker_main,
-                args=(input_name, output_name, self._shutdown_event),
+                args=(
+                    input_name,
+                    output_name,
+                    self._shutdown_event,
+                    self._request_event,
+                ),
                 daemon=True,
                 name="IKWorkerProcess",
             )
@@ -110,20 +115,32 @@ class IKWorkerClient:
 
     def _cleanup(self) -> None:
         """Clean up subprocess and shared memory."""
+        import time
+
         # Signal shutdown
         if self._shutdown_event:
             self._shutdown_event.set()
 
         # Wait for process to exit
-        if self._process and self._process.is_alive():
-            self._process.join(timeout=2.0)
+        if self._process is not None:
             if self._process.is_alive():
-                logger.warning("IK worker subprocess did not exit cleanly, terminating")
-                self._process.terminate()
-                self._process.join(timeout=1.0)
+                self._process.join(timeout=2.0)
+                if self._process.is_alive():
+                    logger.warning(
+                        "IK worker subprocess did not exit cleanly, terminating"
+                    )
+                    self._process.terminate()
+                    self._process.join(timeout=1.0)
+
+            # Wait for exitcode to be set (indicates process fully terminated)
+            # This ensures the subprocess's finally block has completed
+            deadline = time.time() + 1.0
+            while self._process.exitcode is None and time.time() < deadline:
+                time.sleep(0.01)
 
         self._process = None
         self._shutdown_event = None
+        self._request_event = None
 
         # Release memoryviews before closing shared memory to avoid BufferError
         try:
@@ -163,11 +180,11 @@ class IKWorkerClient:
         if not self._started:
             self.start()
 
-        if self._input_mv is None:
+        if self._input_mv is None or self._request_event is None:
             return
 
-        self._last_req_seq += 1
-        pack_ik_request(self._input_mv, q_rad, T_matrix, self._last_req_seq)
+        pack_ik_request(self._input_mv, q_rad, T_matrix)
+        self._request_event.set()  # Wake up worker immediately
 
     def get_results_if_ready(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """
@@ -180,11 +197,12 @@ class IKWorkerClient:
         if self._output_mv is None:
             return None
 
-        resp_seq = get_ik_resp_seq(self._output_mv)
+        joint_en, cart_en_wrf, cart_en_trf, version = unpack_ik_response(
+            self._output_mv
+        )
 
-        if resp_seq != self._last_resp_seq and resp_seq == self._last_req_seq:
-            self._last_resp_seq = resp_seq
-            joint_en, cart_en_wrf, cart_en_trf, _ = unpack_ik_response(self._output_mv)
+        if version != self._last_resp_version and version > 0:
+            self._last_resp_version = version
 
             # Cache results
             self._joint_en = joint_en
@@ -207,7 +225,3 @@ class IKWorkerClient:
             self._cart_en_wrf.copy(),
             self._cart_en_trf.copy(),
         )
-
-    def has_pending_request(self) -> bool:
-        """Check if there's a pending request awaiting response."""
-        return self._last_req_seq > self._last_resp_seq

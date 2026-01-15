@@ -6,11 +6,15 @@ the main controller process and the MockSerial/IK worker subprocesses.
 """
 
 import struct
+import sys
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Tuple
 
 import numpy as np
+
+# track parameter added in Python 3.13
+_SHM_EXTRA_KWARGS = {"track": False} if sys.version_info >= (3, 13) else {}
 
 
 # ==============================================================================
@@ -120,14 +124,12 @@ class IKInputLayout:
     """
     Layout for IK input buffer (main process -> IK worker).
 
-    Total size: 200 bytes
+    Total size: 176 bytes
     """
 
     Q_RAD_OFFSET: int = 0  # float64[6] = 48 bytes (joint angles in radians)
     T_FLAT_OFFSET: int = 48  # float64[16] = 128 bytes (4x4 transform matrix)
-    REQ_SEQ_OFFSET: int = 176  # uint64 = 8 bytes (request sequence number)
-    FLAGS_OFFSET: int = 184  # uint64 = 8 bytes (tool_changed, etc.)
-    TOTAL_SIZE: int = 200
+    TOTAL_SIZE: int = 176
 
 
 @dataclass(frozen=True)
@@ -135,14 +137,14 @@ class IKOutputLayout:
     """
     Layout for IK output buffer (IK worker -> main process).
 
-    Total size: 48 bytes
+    Total size: 44 bytes
     """
 
     JOINT_EN_OFFSET: int = 0  # uint8[12] = 12 bytes
     CART_EN_WRF_OFFSET: int = 12  # uint8[12] = 12 bytes
     CART_EN_TRF_OFFSET: int = 24  # uint8[12] = 12 bytes
-    RESP_SEQ_OFFSET: int = 36  # uint64 = 8 bytes
-    TOTAL_SIZE: int = 48
+    VERSION_OFFSET: int = 36  # uint64 = 8 bytes - incremented each response
+    TOTAL_SIZE: int = 44
 
 
 IK_INPUT_SHM_SIZE = IKInputLayout.TOTAL_SIZE
@@ -153,8 +155,6 @@ def pack_ik_request(
     buf: memoryview,
     q_rad: np.ndarray,
     T_matrix: np.ndarray,
-    req_seq: int,
-    flags: int = 0,
 ) -> None:
     """Pack IK request into input shared memory buffer."""
     layout = IKInputLayout
@@ -163,13 +163,9 @@ def pack_ik_request(
     # Transform matrix flattened (16 x float64)
     T_flat = T_matrix.flatten()[:16]
     struct.pack_into("<16d", buf, layout.T_FLAT_OFFSET, *T_flat)
-    # Request sequence
-    struct.pack_into("<Q", buf, layout.REQ_SEQ_OFFSET, req_seq)
-    # Flags
-    struct.pack_into("<Q", buf, layout.FLAGS_OFFSET, flags)
 
 
-def unpack_ik_request(buf: memoryview) -> Tuple[np.ndarray, np.ndarray, int, int]:
+def unpack_ik_request(buf: memoryview) -> Tuple[np.ndarray, np.ndarray]:
     """Unpack IK request from input shared memory buffer."""
     layout = IKInputLayout
     q_rad = np.array(
@@ -179,9 +175,7 @@ def unpack_ik_request(buf: memoryview) -> Tuple[np.ndarray, np.ndarray, int, int
         struct.unpack_from("<16d", buf, layout.T_FLAT_OFFSET), dtype=np.float64
     )
     T_matrix = T_flat.reshape((4, 4))
-    req_seq = struct.unpack_from("<Q", buf, layout.REQ_SEQ_OFFSET)[0]
-    flags = struct.unpack_from("<Q", buf, layout.FLAGS_OFFSET)[0]
-    return q_rad, T_matrix, req_seq, flags
+    return q_rad, T_matrix
 
 
 def pack_ik_response(
@@ -189,7 +183,7 @@ def pack_ik_response(
     joint_en: np.ndarray,
     cart_en_wrf: np.ndarray,
     cart_en_trf: np.ndarray,
-    resp_seq: int,
+    version: int,
 ) -> None:
     """Pack IK response into output shared memory buffer."""
     layout = IKOutputLayout
@@ -200,7 +194,7 @@ def pack_ik_response(
     buf[layout.CART_EN_TRF_OFFSET : layout.CART_EN_TRF_OFFSET + 12] = cart_en_trf[
         :12
     ].tobytes()
-    struct.pack_into("<Q", buf, layout.RESP_SEQ_OFFSET, resp_seq)
+    struct.pack_into("<Q", buf, layout.VERSION_OFFSET, version)
 
 
 def unpack_ik_response(
@@ -217,13 +211,8 @@ def unpack_ik_response(
     cart_en_trf = np.frombuffer(
         buf[layout.CART_EN_TRF_OFFSET : layout.CART_EN_TRF_OFFSET + 12], dtype=np.uint8
     ).copy()
-    resp_seq = struct.unpack_from("<Q", buf, layout.RESP_SEQ_OFFSET)[0]
-    return joint_en, cart_en_wrf, cart_en_trf, resp_seq
-
-
-def get_ik_resp_seq(buf: memoryview) -> int:
-    """Get just the response sequence number (for polling)."""
-    return struct.unpack_from("<Q", buf, IKOutputLayout.RESP_SEQ_OFFSET)[0]
+    version = struct.unpack_from("<Q", buf, layout.VERSION_OFFSET)[0]
+    return joint_en, cart_en_wrf, cart_en_trf, version
 
 
 # ==============================================================================
@@ -240,12 +229,15 @@ def create_shm(name: str, size: int) -> SharedMemory:
         existing.unlink()
     except FileNotFoundError:
         pass
-    return SharedMemory(name=name, create=True, size=size)
+    # Use track=False (Python 3.13+) to prevent resource tracker from trying to clean up
+    # segments that may have already been unlinked by another process
+    return SharedMemory(name=name, create=True, size=size, **_SHM_EXTRA_KWARGS)
 
 
 def attach_shm(name: str) -> SharedMemory:
     """Attach to an existing shared memory segment."""
-    return SharedMemory(name=name, create=False)
+    # Use track=False (Python 3.13+) to prevent resource tracker conflicts when main process unlinks
+    return SharedMemory(name=name, create=False, **_SHM_EXTRA_KWARGS)
 
 
 def cleanup_shm(shm: SharedMemory | None) -> None:
