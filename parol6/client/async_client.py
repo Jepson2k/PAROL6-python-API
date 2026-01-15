@@ -206,7 +206,12 @@ class AsyncRobotClient:
 
         # Stop multicast listener
         if self._multicast_task is not None:
-            self._multicast_task.cancel()
+            # Guard against canceling a task whose event loop is already closed
+            # (can happen in test teardown when close() runs on a new loop)
+            try:
+                self._multicast_task.cancel()
+            except RuntimeError:
+                pass  # Event loop is closed
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._multicast_task
             self._multicast_task = None
