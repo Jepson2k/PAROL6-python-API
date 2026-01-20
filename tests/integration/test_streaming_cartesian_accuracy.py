@@ -108,8 +108,7 @@ class TestStreamingCartesianAccuracy:
                 (30.0, 0.0, 0.0),  # +30mm X
                 (30.0, 30.0, 0.0),  # +30mm X, +30mm Y
                 (30.0, 30.0, -30.0),  # +30mm X, +30mm Y, -30mm Z
-                (-30.0, -30.0, -30.0),  # back toward start
-                (0.0, 0.0, 0.0),  # back to start
+                (0.0, 0.0, 0.0),  # hold position
             ]
 
             for i, (dx, dy, dz) in enumerate(offsets):

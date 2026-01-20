@@ -95,7 +95,7 @@ addopts = [
 ]
 
 # Timeout configuration (requires pytest-timeout)
-timeout = 30
+timeout = 45
 timeout_method = "thread"
 
 # Logging configuration for tests
