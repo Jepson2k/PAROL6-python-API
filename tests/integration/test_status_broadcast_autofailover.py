@@ -10,6 +10,7 @@ from parol6.server.state import StateManager
 from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.status_cache import get_cache
 from parol6.client.status_subscriber import subscribe_status
+from parol6.protocol.wire import StatusBuffer
 
 
 def _free_udp_port() -> int:
@@ -74,8 +75,8 @@ async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
             async for status in subscribe_status(
                 group=group, port=port, iface_ip=iface
             ):
-                assert isinstance(status, dict)
-                assert "angles" in status
+                assert isinstance(status, StatusBuffer)
+                assert status.angles is not None
                 return True
                 if time.time() > deadline:
                     break
@@ -121,8 +122,8 @@ async def test_subscriber_multicast_socket_receives_unicast(monkeypatch):
             async for status in subscribe_status(
                 group=group, port=port, iface_ip=iface
             ):
-                assert isinstance(status, dict)
-                assert "io" in status
+                assert isinstance(status, StatusBuffer)
+                assert status.io is not None
                 return True
         finally:
             with contextlib.suppress(Exception):

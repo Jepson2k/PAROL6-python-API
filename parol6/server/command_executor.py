@@ -380,18 +380,23 @@ class CommandExecutor:
             Number of commands cleared.
         """
         removed_count = 0
+        to_remove: list[QueuedCommand] = []
 
-        for queued_cmd in list(self.command_queue):
+        # First pass: identify commands to remove (no mutation during iteration)
+        for queued_cmd in self.command_queue:
             if isinstance(queued_cmd.command, MotionCommand) and getattr(
                 queued_cmd.command, "streamable", False
             ):
-                self.command_queue.remove(queued_cmd)
-                removed_count += 1
+                to_remove.append(queued_cmd)
 
-                if queued_cmd.command_id and queued_cmd.address:
-                    self._send_ack(
-                        queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address
-                    )
+        # Second pass: remove and send acks
+        for queued_cmd in to_remove:
+            self.command_queue.remove(queued_cmd)
+            removed_count += 1
+            if queued_cmd.command_id and queued_cmd.address:
+                self._send_ack(
+                    queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address
+                )
 
         if removed_count > 0:
             logger.debug(
@@ -410,16 +415,13 @@ class CommandExecutor:
             if not next_gcode_cmd:
                 return
 
-            command_obj, _ = create_command_from_parts(next_gcode_cmd.split("|"))
+            # Split once and reuse for both command parsing and logging
+            cmd_parts = next_gcode_cmd.split("|")
+            command_obj, _ = create_command_from_parts(cmd_parts)
 
             if command_obj:
                 self.queue_command(("127.0.0.1", 0), command_obj, None)
-                cmd_name = (
-                    next_gcode_cmd.split("|")[0]
-                    if "|" in next_gcode_cmd
-                    else next_gcode_cmd
-                )
-                logger.debug(f"Queued GCODE command: {cmd_name}")
+                logger.debug(f"Queued GCODE command: {cmd_parts[0]}")
             else:
                 logger.warning(f"Unknown GCODE command generated: {next_gcode_cmd}")
 

@@ -137,89 +137,101 @@ class StatusCache:
           - Only refresh IO/speeds/gripper when their inputs actually change
           - IK enablement is computed asynchronously in a subprocess
         """
-        now = time.time()
-        changed_any = False
+        now = time.monotonic()
 
-        with self._lock:
-            # Copy IO slice to contiguous buffer for numba
-            np.copyto(self._last_io_buf, state.InOut_in[:5])
+        # Do change detection outside lock to minimize critical section
+        np.copyto(self._last_io_buf, state.InOut_in[:5])
+        pos_changed, io_changed, spd_changed, grip_changed = _update_arrays(
+            state.Position_in,
+            self._last_io_buf,
+            state.Speed_in,
+            state.Gripper_data_in,
+            self._last_pos_in,
+            self.angles_deg,
+            self._q_rad_buf,
+            self.io,
+            self.speeds,
+            self.gripper,
+        )
+        tool_changed = state.current_tool != self._last_tool_name
 
-            # Check and update all arrays in one numba call
-            pos_changed, io_changed, spd_changed, grip_changed = _update_arrays(
-                state.Position_in,
-                self._last_io_buf,
-                state.Speed_in,
-                state.Gripper_data_in,
-                self._last_pos_in,
-                self.angles_deg,
-                self._q_rad_buf,
-                self.io,
-                self.speeds,
-                self.gripper,
-            )
+        # Pre-compute ASCII strings outside lock if changed
+        new_angles_ascii = None
+        new_pose_ascii = None
+        new_joint_en_ascii = None
+        new_cart_en_wrf_ascii = None
+        new_cart_en_trf_ascii = None
+        new_io_ascii = None
+        new_speeds_ascii = None
+        new_gripper_ascii = None
 
-            # Check if tool changed
-            tool_changed = state.current_tool != self._last_tool_name
+        if pos_changed or tool_changed:
+            if tool_changed:
+                self._last_tool_name = state.current_tool
+            new_angles_ascii = self._format_csv_from_list(self.angles_deg)
+            pose_flat_mm = get_fkine_flat_mm(state)
+            np.copyto(self.pose, pose_flat_mm)
+            new_pose_ascii = self._format_csv_from_list(self.pose)
+            # Submit IK request asynchronously
+            try:
+                T_matrix = get_fkine_matrix(state)
+                self._ik_client.submit_request(self._q_rad_buf, T_matrix)
+            except Exception:
+                pass
 
-            if pos_changed or tool_changed:
-                if tool_changed:
-                    self._last_tool_name = state.current_tool
+        # Poll for async IK results (non-blocking)
+        results = self._ik_client.get_results_if_ready()
+        if results is not None:
+            np.copyto(self.joint_en, results[0])
+            np.copyto(self.cart_en_wrf, results[1])
+            np.copyto(self.cart_en_trf, results[2])
+            new_joint_en_ascii = self._format_csv_from_list(self.joint_en)
+            new_cart_en_wrf_ascii = self._format_csv_from_list(self.cart_en_wrf)
+            new_cart_en_trf_ascii = self._format_csv_from_list(self.cart_en_trf)
 
-                self._angles_ascii = self._format_csv_from_list(self.angles_deg)
-                changed_any = True
+        if io_changed:
+            new_io_ascii = self._format_csv_from_list(self.io)
 
-                # Get cached fkine (automatically updates if needed)
-                pose_flat_mm = get_fkine_flat_mm(state)
-                np.copyto(self.pose, pose_flat_mm)
-                self._pose_ascii = self._format_csv_from_list(self.pose)
+        if spd_changed:
+            new_speeds_ascii = self._format_csv_from_list(self.speeds)
 
-                # Submit IK request asynchronously
-                try:
-                    T_matrix = get_fkine_matrix(state)
-                    self._ik_client.submit_request(self._q_rad_buf, T_matrix)
-                except Exception:
-                    pass  # IK request failed, will use cached values
+        if grip_changed:
+            new_gripper_ascii = self._format_csv_from_list(self.gripper)
 
-            # Poll for async IK results (non-blocking)
-            results = self._ik_client.get_results_if_ready()
-            if results is not None:
-                np.copyto(self.joint_en, results[0])
-                np.copyto(self.cart_en_wrf, results[1])
-                np.copyto(self.cart_en_trf, results[2])
-                self._joint_en_ascii = self._format_csv_from_list(
-                    self.joint_en.tolist()
-                )
-                self._cart_en_wrf_ascii = self._format_csv_from_list(
-                    self.cart_en_wrf.tolist()
-                )
-                self._cart_en_trf_ascii = self._format_csv_from_list(
-                    self.cart_en_trf.tolist()
-                )
-                changed_any = True
+        action_changed = (
+            self._action_current != state.action_current
+            or self._action_state != state.action_state
+        )
 
-            if io_changed:
-                self._io_ascii = self._format_csv_from_list(self.io)
-                changed_any = True
+        changed_any = (
+            new_angles_ascii is not None
+            or results is not None
+            or new_io_ascii is not None
+            or new_speeds_ascii is not None
+            or new_gripper_ascii is not None
+            or action_changed
+        )
 
-            if spd_changed:
-                self._speeds_ascii = self._format_csv_from_list(self.speeds)
-                changed_any = True
+        # Minimal critical section - only update cached values
+        if changed_any:
+            with self._lock:
+                if new_angles_ascii is not None:
+                    self._angles_ascii = new_angles_ascii
+                    self._pose_ascii = new_pose_ascii  # type: ignore[assignment]
+                if results is not None:
+                    self._joint_en_ascii = new_joint_en_ascii  # type: ignore[assignment]
+                    self._cart_en_wrf_ascii = new_cart_en_wrf_ascii  # type: ignore[assignment]
+                    self._cart_en_trf_ascii = new_cart_en_trf_ascii  # type: ignore[assignment]
+                if new_io_ascii is not None:
+                    self._io_ascii = new_io_ascii
+                if new_speeds_ascii is not None:
+                    self._speeds_ascii = new_speeds_ascii
+                if new_gripper_ascii is not None:
+                    self._gripper_ascii = new_gripper_ascii
+                if action_changed:
+                    self._action_current = state.action_current
+                    self._action_state = state.action_state
 
-            if grip_changed:
-                self._gripper_ascii = self._format_csv_from_list(self.gripper)
-                changed_any = True
-
-            # 5) Action tracking
-            if (
-                self._action_current != state.action_current
-                or self._action_state != state.action_state
-            ):
-                self._action_current = state.action_current
-                self._action_state = state.action_state
-                changed_any = True
-
-            # 6) Assemble full ASCII only if any section changed
-            if changed_any:
                 self._ascii_full = (
                     f"STATUS|POSE={self._pose_ascii}"
                     f"|ANGLES={self._angles_ascii}"
@@ -241,13 +253,13 @@ class StatusCache:
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""
-        self.last_serial_s = time.time()
+        self.last_serial_s = time.monotonic()
 
     def age_s(self) -> float:
         """Seconds since last fresh serial observation (used to gate broadcasting)."""
         if self.last_serial_s <= 0:
             return 1e9
-        return time.time() - self.last_serial_s
+        return time.monotonic() - self.last_serial_s
 
 
 # Module-level singleton

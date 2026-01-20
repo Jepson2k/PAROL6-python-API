@@ -9,7 +9,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
-import sophuspy as sp
+from numba import njit  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
     pass
@@ -30,8 +30,10 @@ from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
 from parol6.utils.ik import AXIS_MAP, solve_ik
 from parol6.utils.se3_utils import (
+    se3_exp_ws,
     se3_from_rpy,
     se3_interp,
+    se3_mul,
 )
 
 from .base import (
@@ -42,6 +44,107 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@njit(cache=True)
+def _apply_velocity_delta_wrf_jit(
+    R: np.ndarray,
+    smoothed_vel: np.ndarray,
+    dt: float,
+    current_pose: np.ndarray,
+    vel_lin: np.ndarray,
+    vel_ang: np.ndarray,
+    world_twist: np.ndarray,
+    delta: np.ndarray,
+    out: np.ndarray,
+    omega_ws: np.ndarray,
+    R_ws: np.ndarray,
+    V_ws: np.ndarray,
+) -> None:
+    """Apply smoothed velocity delta in World Reference Frame.
+
+    Transforms body-frame velocity to world-frame and left-multiplies.
+    WRF: target = delta @ current (world-frame delta applied first)
+
+    Args:
+        R: 3x3 rotation matrix (reference pose rotation for WRF)
+        smoothed_vel: 6D body-frame velocity [vx, vy, vz, wx, wy, wz]
+        dt: Time step
+        current_pose: Current pose as 4x4 SE3
+        vel_lin: Workspace buffer for linear velocity (3,)
+        vel_ang: Workspace buffer for angular velocity (3,)
+        world_twist: Workspace buffer for world-frame twist (6,)
+        delta: Workspace buffer for delta transform (4x4)
+        out: Output pose (4x4 SE3)
+        omega_ws: Workspace buffer for axis-angle (3,)
+        R_ws: Workspace buffer for rotation matrix (3,3)
+        V_ws: Workspace buffer for V matrix (3,3)
+    """
+    # Transform velocity to world frame: R @ vel
+    for i in range(3):
+        vel_lin[i] = (
+            R[i, 0] * smoothed_vel[0]
+            + R[i, 1] * smoothed_vel[1]
+            + R[i, 2] * smoothed_vel[2]
+        )
+        vel_ang[i] = (
+            R[i, 0] * smoothed_vel[3]
+            + R[i, 1] * smoothed_vel[4]
+            + R[i, 2] * smoothed_vel[5]
+        )
+
+    # Build world-frame twist scaled by dt
+    world_twist[0] = vel_lin[0] * dt
+    world_twist[1] = vel_lin[1] * dt
+    world_twist[2] = vel_lin[2] * dt
+    world_twist[3] = vel_ang[0] * dt
+    world_twist[4] = vel_ang[1] * dt
+    world_twist[5] = vel_ang[2] * dt
+
+    # Exponential map and apply (world frame = left multiply)
+    se3_exp_ws(world_twist, delta, omega_ws, R_ws, V_ws)
+    se3_mul(delta, current_pose, out)
+
+
+@njit(cache=True)
+def _apply_velocity_delta_trf_jit(
+    smoothed_vel: np.ndarray,
+    dt: float,
+    current_pose: np.ndarray,
+    body_twist: np.ndarray,
+    delta: np.ndarray,
+    out: np.ndarray,
+    omega_ws: np.ndarray,
+    R_ws: np.ndarray,
+    V_ws: np.ndarray,
+) -> None:
+    """Apply smoothed velocity delta in Tool Reference Frame.
+
+    Uses body-frame velocity directly and right-multiplies.
+    TRF: target = current @ delta (body-frame delta applied in tool frame)
+
+    Args:
+        smoothed_vel: 6D body-frame velocity [vx, vy, vz, wx, wy, wz]
+        dt: Time step
+        current_pose: Current pose as 4x4 SE3
+        body_twist: Workspace buffer for body-frame twist (6,)
+        delta: Workspace buffer for delta transform (4x4)
+        out: Output pose (4x4 SE3)
+        omega_ws: Workspace buffer for axis-angle (3,)
+        R_ws: Workspace buffer for rotation matrix (3,3)
+        V_ws: Workspace buffer for V matrix (3,3)
+    """
+    # Build body-frame twist scaled by dt (no transformation needed)
+    body_twist[0] = smoothed_vel[0] * dt
+    body_twist[1] = smoothed_vel[1] * dt
+    body_twist[2] = smoothed_vel[2] * dt
+    body_twist[3] = smoothed_vel[3] * dt
+    body_twist[4] = smoothed_vel[4] * dt
+    body_twist[5] = smoothed_vel[5] * dt
+
+    # Exponential map and apply (tool frame = right multiply)
+    se3_exp_ws(body_twist, delta, omega_ws, R_ws, V_ws)
+    se3_mul(current_pose, delta, out)
 
 
 class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
@@ -70,8 +173,8 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
         self.duration: float | None = None
         self.velocity_percent: float | None = None
         self.accel_percent: float = DEFAULT_ACCEL_PERCENT
-        self.initial_pose: sp.SE3 | None = None
-        self.target_pose: sp.SE3 | None = None
+        self.initial_pose: np.ndarray | None = None
+        self.target_pose: np.ndarray | None = None
 
     @abstractmethod
     def _compute_target_pose(self, state: "ControllerState") -> None:
@@ -102,9 +205,11 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
         acc_pct = self.accel_percent if self.accel_percent is not None else 100.0
 
         cart_poses = []
+        interp_buf = np.zeros((4, 4), dtype=np.float64)
         for i in range(PATH_SAMPLES):
             s = i / (PATH_SAMPLES - 1)
-            cart_poses.append(se3_interp(self.initial_pose, self.target_pose, s))
+            se3_interp(self.initial_pose, self.target_pose, s, interp_buf)
+            cart_poses.append(interp_buf.copy())
 
         joint_path = JointPath.from_poses(cart_poses, current_rad, quiet_logging=True)
 
@@ -149,6 +254,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
 
             # Initialize on first tick, or if executor not active (streaming interrupted)
             if not self._streaming_initialized or not cse.active:
+                assert self.initial_pose is not None and self.target_pose is not None
                 # Only sync pose if not already active to preserve velocity
                 if not cse.active:
                     cse.sync_pose(self.initial_pose)
@@ -173,7 +279,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
                 if not self._ik_stopping:
                     logger.warning(
                         f"[MOVECART] IK failed - initiating graceful stop: "
-                        f"pos={smoothed_pose.translation()}"
+                        f"pos={smoothed_pose[:3, 3]}"
                     )
                     cse.stop()
                     self._ik_stopping = True
@@ -191,6 +297,7 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
             # IK succeeded - if we were stopping, recover by resuming motion
             if self._ik_stopping:
                 logger.info("[MOVECART] IK recovered - resuming motion")
+                assert self.target_pose is not None
                 cse.set_pose_target(self.target_pose)
                 self._ik_stopping = False
 
@@ -200,6 +307,8 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
 
             if finished:
                 self.log_info("%s (streaming) finished.", self.__class__.__name__)
+                # Deactivate executor so next command properly syncs pose
+                cse.active = False
                 self.is_finished = True
                 return ExecutionStatus.completed(f"{self.__class__.__name__} complete")
 
@@ -226,9 +335,18 @@ class CartesianJogCommand(MotionCommand):
         "axis_vectors",
         "is_rotation",
         "_ik_stopping",
+        "_jog_initialized",
+        "_axis_index",
+        "_axis_sign",
+        # Pre-allocated buffers (allocated once in __init__, reused across streaming)
         "_world_twist_buf",
         "_vel_lin_buf",
         "_vel_ang_buf",
+        "_delta_se3_buf",
+        "_target_pose_buf",
+        "_omega_ws",
+        "_R_ws",
+        "_V_ws",
     )
 
     # Class-level rate limiting for IK warnings (shared across instances)
@@ -244,6 +362,20 @@ class CartesianJogCommand(MotionCommand):
         self.duration: float = 1.5
         self.axis_vectors = None
         self.is_rotation = False
+        self._ik_stopping = False
+        self._jog_initialized = False
+        self._axis_index = 0
+        self._axis_sign = 1.0
+
+        # Pre-allocate buffers once (reused across streaming updates)
+        self._world_twist_buf = np.zeros(6, dtype=np.float64)
+        self._vel_lin_buf = np.zeros(3, dtype=np.float64)
+        self._vel_ang_buf = np.zeros(3, dtype=np.float64)
+        self._delta_se3_buf = np.zeros((4, 4), dtype=np.float64)
+        self._target_pose_buf = np.zeros((4, 4), dtype=np.float64)
+        self._omega_ws = np.zeros(3, dtype=np.float64)
+        self._R_ws = np.zeros((3, 3), dtype=np.float64)
+        self._V_ws = np.zeros((3, 3), dtype=np.float64)
 
     def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
         """
@@ -280,10 +412,8 @@ class CartesianJogCommand(MotionCommand):
     def do_setup(self, state: "ControllerState") -> None:
         """Set the end time when the command actually starts."""
         self.start_timer(float(self.duration))
-        self._jog_initialized = (
-            False  # Track whether cartesian executor has been synced
-        )
-        self._ik_stopping = False  # Track graceful stop on IK failure
+        self._jog_initialized = False
+        self._ik_stopping = False
 
         # Parse axis index and sign from axis_vectors
         # axis_vectors is ([x,y,z], [rx,ry,rz]) where exactly one component is ±1
@@ -293,48 +423,55 @@ class CartesianJogCommand(MotionCommand):
             vec = self.axis_vectors[0]  # Linear vector
 
         # Find which axis (0=X, 1=Y, 2=Z)
-        self._axis_index = 0
-        self._axis_sign = 1.0
         for i, v in enumerate(vec):
             if v != 0:
                 self._axis_index = i
                 self._axis_sign = float(np.sign(v))
                 break
 
-        # Pre-allocate buffers for hot path (avoids allocations per tick)
-        self._world_twist_buf = np.zeros(6, dtype=np.float64)
-        self._vel_lin_buf = np.zeros(3, dtype=np.float64)
-        self._vel_ang_buf = np.zeros(3, dtype=np.float64)
-
-    def _apply_smoothed_velocity(
+    def _compute_target_pose_from_velocity(
         self, state: "ControllerState", smoothed_vel: np.ndarray
-    ) -> sp.SE3:
-        """Apply smoothed velocity to actual current pose.
+    ) -> None:
+        """Compute target pose from smoothed velocity, storing result in _target_pose_buf.
 
-        Converts body-frame velocity to world-frame and applies as delta.
-        Returns the target pose for IK solving.
+        For WRF: transforms body-frame velocity to world-frame and left-multiplies.
+        For TRF: uses body-frame velocity directly and right-multiplies.
         """
         cse = state.cartesian_streaming_executor
         assert cse is not None
         current_pose = get_fkine_se3(state)
 
-        # WRF: use reference_pose rotation (velocity was transformed TO body frame using it)
-        # TRF: use current_pose rotation (velocity is in tool frame)
         if self.frame == "WRF":
+            # WRF: transform velocity to world frame and left-multiply
             assert cse.reference_pose is not None
-            R = cse.reference_pose.rotationMatrix()
+            R = cse.reference_pose[:3, :3]
+            _apply_velocity_delta_wrf_jit(
+                R,
+                smoothed_vel,
+                cse.dt,
+                current_pose,
+                self._vel_lin_buf,
+                self._vel_ang_buf,
+                self._world_twist_buf,
+                self._delta_se3_buf,
+                self._target_pose_buf,
+                self._omega_ws,
+                self._R_ws,
+                self._V_ws,
+            )
         else:
-            R = current_pose.rotationMatrix()
-
-        np.dot(R, smoothed_vel[:3], out=self._vel_lin_buf)
-        np.dot(R, smoothed_vel[3:], out=self._vel_ang_buf)
-
-        # World-frame delta requires LEFT multiplication (reuse pre-allocated buffer)
-        self._world_twist_buf[:3] = self._vel_lin_buf
-        self._world_twist_buf[3:] = self._vel_ang_buf
-        self._world_twist_buf *= cse.dt
-        delta_se3 = sp.SE3.exp(self._world_twist_buf)
-        return delta_se3 * current_pose
+            # TRF: use body-frame velocity directly and right-multiply
+            _apply_velocity_delta_trf_jit(
+                smoothed_vel,
+                cse.dt,
+                current_pose,
+                self._world_twist_buf,  # reuse as body_twist buffer
+                self._delta_se3_buf,
+                self._target_pose_buf,
+                self._omega_ws,
+                self._R_ws,
+                self._V_ws,
+            )
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Execute one tick of Cartesian jogging using Cartesian-space Ruckig.
@@ -365,8 +502,10 @@ class CartesianJogCommand(MotionCommand):
             _smoothed_pose, smoothed_vel, finished = cse.tick()
 
             if not finished and np.dot(smoothed_vel, smoothed_vel) > 1e-8:
-                target_pose = self._apply_smoothed_velocity(state, smoothed_vel)
-                ik_result = solve_ik(PAROL6_ROBOT.robot, target_pose, self._q_rad_buf)
+                self._compute_target_pose_from_velocity(state, smoothed_vel)
+                ik_result = solve_ik(
+                    PAROL6_ROBOT.robot, self._target_pose_buf, self._q_rad_buf
+                )
                 if ik_result.success and ik_result.q is not None:
                     rad_to_steps(ik_result.q, self._steps_buf)
                     self.set_move_position(state, self._steps_buf)
@@ -397,9 +536,9 @@ class CartesianJogCommand(MotionCommand):
             cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
 
         _smoothed_pose, smoothed_vel, _finished = cse.tick()
-        target_pose = self._apply_smoothed_velocity(state, smoothed_vel)
+        self._compute_target_pose_from_velocity(state, smoothed_vel)
 
-        ik_result = solve_ik(PAROL6_ROBOT.robot, target_pose, self._q_rad_buf)
+        ik_result = solve_ik(PAROL6_ROBOT.robot, self._target_pose_buf, self._q_rad_buf)
         if not ik_result.success or ik_result.q is None:
             if not self._ik_stopping:
                 now = time.monotonic()
@@ -408,7 +547,7 @@ class CartesianJogCommand(MotionCommand):
                     > CartesianJogCommand._IK_WARN_INTERVAL
                 ):
                     logger.warning(
-                        f"[CARTJOG] IK failed - initiating graceful stop: pos={target_pose.translation()}"
+                        f"[CARTJOG] IK failed - initiating graceful stop: pos={self._target_pose_buf[:3, 3]}"
                     )
                     CartesianJogCommand._last_ik_warn_time = now
                 cse.stop()
@@ -426,6 +565,8 @@ class CartesianJogCommand(MotionCommand):
         # IK succeeded - if we were stopping, recover by resuming jogging
         if self._ik_stopping:
             logger.info("[CARTJOG] IK recovered - resuming jog")
+            # Sync to actual robot pose before resuming (CSE drifted during stop)
+            cse.sync_pose(get_fkine_se3(state))
             self._ik_stopping = False
             # Re-apply the jog velocity to resume motion
             if self.frame == "WRF":
@@ -485,14 +626,15 @@ class MoveCartCommand(CartesianMoveCommandBase):
     def _compute_target_pose(self, state: "ControllerState") -> None:
         """Compute absolute target pose from parsed coordinates."""
         pose = cast(list[float], self.pose)
-        self.target_pose = se3_from_rpy(
+        self.target_pose = np.zeros((4, 4), dtype=np.float64)
+        se3_from_rpy(
             pose[0] / 1000.0,
             pose[1] / 1000.0,
             pose[2] / 1000.0,
-            pose[3],
-            pose[4],
-            pose[5],
-            degrees=True,
+            np.radians(pose[3]),
+            np.radians(pose[4]),
+            np.radians(pose[5]),
+            self.target_pose,
         )
 
 
@@ -547,14 +689,15 @@ class MoveCartRelTrfCommand(CartesianMoveCommandBase):
     def _compute_target_pose(self, state: "ControllerState") -> None:
         """Compute target pose from current pose + TRF delta."""
         deltas = cast(list[float], self.deltas)
-        delta_se3 = se3_from_rpy(
+        delta_se3 = np.zeros((4, 4), dtype=np.float64)
+        se3_from_rpy(
             deltas[0] / 1000.0,
             deltas[1] / 1000.0,
             deltas[2] / 1000.0,
-            deltas[3],
-            deltas[4],
-            deltas[5],
-            degrees=True,
+            np.radians(deltas[3]),
+            np.radians(deltas[4]),
+            np.radians(deltas[5]),
+            delta_se3,
         )
         # Post-multiply for tool-relative motion
-        self.target_pose = cast(sp.SE3, self.initial_pose) * delta_se3
+        self.target_pose = cast(np.ndarray, self.initial_pose) @ delta_se3

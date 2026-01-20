@@ -3,7 +3,7 @@ Transport factory for creating appropriate transport instances.
 
 This module provides a factory pattern for creating transport instances
 based on configuration and environment. It automatically selects between
-real serial or mock serial (subprocess-based) transport types.
+real serial or mock serial (inline simulation) transport types.
 """
 
 import logging
@@ -11,7 +11,7 @@ import os
 from typing import Any
 
 from parol6.config import get_com_port_with_fallback
-from parol6.server.transports.mock_serial_adapter import MockSerialProcessAdapter
+from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.serial_transport import SerialTransport
 
 logger = logging.getLogger(__name__)
@@ -33,12 +33,12 @@ def create_transport(
     port: str | None = None,
     baudrate: int = 2000000,
     **kwargs: Any,
-) -> SerialTransport | MockSerialProcessAdapter:
+) -> SerialTransport | MockSerialTransport:
     """
     Create an appropriate transport instance based on configuration.
 
     The factory will automatically select the appropriate transport:
-    - MockSerialProcessAdapter if PAROL6_FAKE_SERIAL is set
+    - MockSerialTransport if PAROL6_FAKE_SERIAL is set
     - SerialTransport otherwise
 
     Args:
@@ -48,7 +48,7 @@ def create_transport(
         **kwargs: Additional transport-specific parameters
 
     Returns:
-        Transport instance (SerialTransport or MockSerialProcessAdapter)
+        Transport instance (SerialTransport or MockSerialTransport)
     """
     # Determine transport type
     if transport_type is None:
@@ -60,9 +60,9 @@ def create_transport(
 
     # Create appropriate transport
     if transport_type == "mock":
-        logger.info("Creating MockSerialProcessAdapter for simulation")
-        transport: MockSerialProcessAdapter | SerialTransport = (
-            MockSerialProcessAdapter(port=port, baudrate=baudrate, **kwargs)
+        logger.info("Creating MockSerialTransport for simulation")
+        transport: MockSerialTransport | SerialTransport = MockSerialTransport(
+            port=port, baudrate=baudrate, **kwargs
         )
 
     elif transport_type == "serial":
@@ -81,7 +81,7 @@ def create_and_connect_transport(
     baudrate: int = 2000000,
     auto_find_port: bool = True,
     **kwargs: Any,
-) -> SerialTransport | MockSerialProcessAdapter | None:
+) -> SerialTransport | MockSerialTransport | None:
     """
     Create and connect a transport instance.
 

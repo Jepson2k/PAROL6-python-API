@@ -7,8 +7,11 @@ import time
 from collections.abc import AsyncIterator
 
 from parol6 import config as cfg
-from parol6.protocol.types import StatusAggregate
-from parol6.protocol.wire import decode_status
+from parol6.protocol.wire import (
+    StatusBuffer,
+    decode_status_into,
+)
+from parol6.server.loop_timer import LoopMetrics, format_hz_summary
 
 logger = logging.getLogger(__name__)
 
@@ -19,34 +22,21 @@ class UDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, queue: asyncio.Queue):
         self.queue = queue
         self.transport = None
-        self.receive_count = 0
-        self.last_log_time = time.time()
 
-        # EMA rate tracking for RX
-        self._rx_count = 0
-        self._rx_last_time = time.monotonic()
-        self._rx_ema_period = 0.05  # Initialize with ~20 Hz expected
-        self._rx_last_log_time = time.monotonic()
+        # RX rate tracking with LoopMetrics
+        self._metrics = LoopMetrics()
+        self._metrics.configure(1.0 / cfg.STATUS_RATE_HZ, int(cfg.STATUS_RATE_HZ))
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
-        # Track RX rate with EMA
         now = time.monotonic()
-        if self._rx_count > 0:  # Skip first sample for period calculation
-            period = now - self._rx_last_time
-            if period > 0:
-                # EMA update: 0.1 * new + 0.9 * old
-                self._rx_ema_period = 0.1 * period + 0.9 * self._rx_ema_period
-        self._rx_last_time = now
-        self._rx_count += 1
+        self._metrics.tick(now)
 
-        # Log rate every 3 seconds
-        if now - self._rx_last_log_time >= 3.0 and self._rx_ema_period > 0:
-            rx_hz = 1.0 / self._rx_ema_period
-            logger.debug(f"Status RX: {rx_hz:.1f} Hz (count={self._rx_count})")
-            self._rx_last_log_time = now
+        # Rate-limited debug log every 3s
+        if self._metrics.should_log(now, 3.0):
+            logger.debug("rx: %s", format_hz_summary(self._metrics))
 
         try:
             self.queue.put_nowait((data, addr))
@@ -138,28 +128,45 @@ def _create_unicast_socket(port: int, host: str) -> socket.socket:
     return sock
 
 
-async def subscribe_status(
-    group: str | None = None, port: int | None = None, iface_ip: str | None = None
-) -> AsyncIterator[StatusAggregate]:
-    """
-    Async generator that yields decoded STATUS dicts from the UDP broadcaster.
+async def subscribe_status_into(
+    buf: StatusBuffer,
+    group: str | None = None,
+    port: int | None = None,
+    iface_ip: str | None = None,
+) -> AsyncIterator[StatusBuffer]:
+    """Zero-allocation status subscription - fills caller-provided buffer.
 
-    Uses create_datagram_endpoint for uvloop compatibility.
+    This is the preferred API for high-frequency status consumers that want
+    to avoid GC pressure. The caller provides their own StatusBuffer and
+    this generator fills it in place on each iteration.
 
-    Notes:
-    - Uses loopback multicast by default (cfg.MCAST_* values).
-    - Yields only messages that decode successfully via decode_status; otherwise skips.
+    WARNING: The same buffer instance is yielded on every iteration.
+    Caller must process data before the next iteration overwrites it.
+
+    Args:
+        buf: Caller-owned StatusBuffer to fill with each status update
+        group: Multicast group (default from config)
+        port: UDP port (default from config)
+        iface_ip: Interface IP for multicast (default from config)
+
+    Yields:
+        The same StatusBuffer instance, filled with new data each iteration
+
+    Example:
+        buf = StatusBuffer()
+        async for _ in subscribe_status_into(buf):
+            process(buf.angles)  # Must process before next iteration
     """
     group = group or cfg.MCAST_GROUP
     port = port or cfg.MCAST_PORT
     iface_ip = iface_ip or cfg.MCAST_IF
 
     logger.info(
-        f"subscribe_status starting: transport={cfg.STATUS_TRANSPORT} group={group}, port={port}, iface_ip={iface_ip}"
+        f"subscribe_status_into starting: transport={cfg.STATUS_TRANSPORT} group={group}, port={port}, iface_ip={iface_ip}"
     )
 
     loop = asyncio.get_running_loop()
-    queue = asyncio.Queue(maxsize=100)  # type: ignore
+    queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue(maxsize=100)
 
     # Create the socket based on configured transport
     if cfg.STATUS_TRANSPORT == "UNICAST":
@@ -181,9 +188,9 @@ async def subscribe_status(
                 data, addr = await asyncio.wait_for(queue.get(), timeout=2.0)
                 text = data.decode("ascii", errors="ignore")
 
-                parsed = decode_status(text)
-                if parsed is not None:
-                    yield parsed
+                # Zero-allocation path: fill caller's buffer
+                if decode_status_into(text, buf):
+                    yield buf
 
             except (asyncio.TimeoutError, TimeoutError):
                 logger.warning(
@@ -197,7 +204,7 @@ async def subscribe_status(
     except Exception as e:
         # Log unexpected errors, but not "Event loop is closed" during shutdown
         if "Event loop is closed" not in str(e):
-            logger.error(f"Error in subscribe_status: {e}")
+            logger.error(f"Error in subscribe_status_into: {e}")
     finally:
         try:
             if transport:
@@ -208,3 +215,26 @@ async def subscribe_status(
             sock.close()
         except Exception:
             pass
+
+
+async def subscribe_status(
+    group: str | None = None,
+    port: int | None = None,
+    iface_ip: str | None = None,
+) -> AsyncIterator[StatusBuffer]:
+    """Async generator yielding status updates with owned data.
+
+    Each yielded StatusBuffer is a fresh copy - safe to store or process
+    asynchronously. For zero-allocation hot paths, use subscribe_status_into().
+
+    Args:
+        group: Multicast group (default from config)
+        port: UDP port (default from config)
+        iface_ip: Interface IP for multicast (default from config)
+
+    Yields:
+        StatusBuffer with copied array data (safe to store)
+    """
+    buf = StatusBuffer()
+    async for _ in subscribe_status_into(buf, group, port, iface_ip):
+        yield buf.copy()

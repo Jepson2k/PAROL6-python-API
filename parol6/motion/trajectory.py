@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,8 +32,6 @@ from parol6.config import INTERVAL_S, LIMITS, rad_to_steps
 from parol6.utils.ik import solve_ik
 from parol6.utils.se3_utils import se3_from_rpy
 
-if TYPE_CHECKING:
-    import sophuspy as sp
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +93,7 @@ class JointPath:
     @classmethod
     def from_poses(
         cls,
-        poses: NDArray[np.float64] | list[sp.SE3],
+        poses: NDArray[np.float64] | list[np.ndarray],
         seed_q: NDArray[np.float64],
         quiet_logging: bool = True,
     ) -> JointPath:

@@ -163,8 +163,8 @@ def test_decode_status_invalid_returns_none():
 def test_decode_ping_success(resp, expected_serial, expected_raw):
     result = wire.decode_ping(resp)
     assert result is not None
-    assert result["serial_connected"] == expected_serial
-    assert result["raw"] == expected_raw
+    assert result.serial_connected == expected_serial
+    assert result.raw == expected_raw
 
 
 @pytest.mark.parametrize(

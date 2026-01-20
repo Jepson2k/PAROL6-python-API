@@ -21,7 +21,6 @@ from parol6.utils.errors import IKError
 from parol6.utils.se3_utils import se3_from_rpy, se3_from_trans, se3_rpy
 
 if TYPE_CHECKING:
-    import sophuspy as sp
     from parol6.server.state import ControllerState
 
 logger = logging.getLogger(__name__)
@@ -38,37 +37,46 @@ _PLANE_NORMALS_TRF: dict[str, NDArray] = {
     "YZ": np.array([1.0, 0.0, 0.0]),  # Tool's X-axis
 }
 
+# Pre-allocated workspace buffers for TRF/WRF transformations (command setup phase)
+_pose_trf_buf: np.ndarray = np.zeros((4, 4), dtype=np.float64)
+_pose_wrf_buf: np.ndarray = np.zeros((4, 4), dtype=np.float64)
+_rpy_rad_buf: np.ndarray = np.zeros(3, dtype=np.float64)
+_result_6_buf: np.ndarray = np.zeros(6, dtype=np.float64)
+
 
 def _pose6_trf_to_wrf(
-    pose6_mm_deg: Sequence[float], tool_pose: "sp.SE3"
+    pose6_mm_deg: Sequence[float], tool_pose: np.ndarray
 ) -> list[float]:
     """Convert 6D pose [x,y,z,rx,ry,rz] from TRF to WRF (mm, degrees)."""
-    pose_trf = se3_from_rpy(
+    se3_from_rpy(
         pose6_mm_deg[0] / 1000.0,
         pose6_mm_deg[1] / 1000.0,
         pose6_mm_deg[2] / 1000.0,
-        pose6_mm_deg[3],
-        pose6_mm_deg[4],
-        pose6_mm_deg[5],
-        degrees=True,
+        np.radians(pose6_mm_deg[3]),
+        np.radians(pose6_mm_deg[4]),
+        np.radians(pose6_mm_deg[5]),
+        _pose_trf_buf,
     )
-    pose_wrf = tool_pose * pose_trf
-    return np.concatenate(
-        [pose_wrf.translation() * 1000.0, se3_rpy(pose_wrf, degrees=True)]
-    ).tolist()
+    np.matmul(tool_pose, _pose_trf_buf, out=_pose_wrf_buf)
+    se3_rpy(_pose_wrf_buf, _rpy_rad_buf)
+    # Build result in pre-allocated buffer
+    _result_6_buf[:3] = _pose_wrf_buf[:3, 3] * 1000.0
+    _result_6_buf[3:] = np.degrees(_rpy_rad_buf)
+    return _result_6_buf.tolist()
 
 
 def _transform_center_trf_to_wrf(
-    params: dict[str, Any], tool_pose: "sp.SE3", transformed: dict[str, Any]
+    params: dict[str, Any], tool_pose: np.ndarray, transformed: dict[str, Any]
 ) -> None:
     """Transform 'center' parameter from TRF (mm) to WRF (mm)."""
-    center_trf = se3_from_trans(
+    se3_from_trans(
         params["center"][0] / 1000.0,
         params["center"][1] / 1000.0,
         params["center"][2] / 1000.0,
+        _pose_trf_buf,
     )
-    center_wrf = tool_pose * center_trf
-    transformed["center"] = (center_wrf.translation() * 1000.0).tolist()
+    np.matmul(tool_pose, _pose_trf_buf, out=_pose_wrf_buf)
+    transformed["center"] = (_pose_wrf_buf[:3, 3] * 1000.0).tolist()
 
 
 def _transform_command_params_to_wrf(
@@ -86,7 +94,7 @@ def _transform_command_params_to_wrf(
             _transform_center_trf_to_wrf(params, tool_pose, transformed)
         if "plane" in params:
             normal_trf = _PLANE_NORMALS_TRF[params["plane"]]
-            normal_wrf = tool_pose.rotationMatrix() @ normal_trf
+            normal_wrf = tool_pose[:3, :3] @ normal_trf
             transformed["normal_vector"] = normal_wrf.tolist()
 
     elif command_type == "SMOOTH_ARC_CENTER":
@@ -96,7 +104,7 @@ def _transform_command_params_to_wrf(
             transformed["end_pose"] = _pose6_trf_to_wrf(params["end_pose"], tool_pose)
         if "plane" in params:
             normal_trf = _PLANE_NORMALS_TRF[params["plane"]]
-            normal_wrf = tool_pose.rotationMatrix() @ normal_trf
+            normal_wrf = tool_pose[:3, :3] @ normal_trf
             transformed["normal_vector"] = normal_wrf.tolist()
 
     elif command_type == "SMOOTH_ARC_PARAM":
@@ -105,7 +113,7 @@ def _transform_command_params_to_wrf(
         if "plane" not in params:
             params["plane"] = "XY"
         normal_trf = _PLANE_NORMALS_TRF[params.get("plane", "XY")]
-        normal_wrf = tool_pose.rotationMatrix() @ normal_trf
+        normal_wrf = tool_pose[:3, :3] @ normal_trf
         transformed["normal_vector"] = normal_wrf.tolist()
 
     elif command_type == "SMOOTH_SPLINE":
@@ -179,9 +187,10 @@ class BaseSmoothMotionCommand(TrajectoryMoveCommandBase):
     def get_current_pose(self, state: "ControllerState") -> np.ndarray:
         """Get current TCP pose as [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]."""
         current_se3 = get_fkine_se3(state)
-        current_xyz = current_se3.translation() * 1000  # m -> mm
-        current_rpy = se3_rpy(current_se3, degrees=True)
-        return np.concatenate([current_xyz, current_rpy])
+        current_xyz = current_se3[:3, 3] * 1000  # m -> mm
+        rpy_rad = np.zeros(3, dtype=np.float64)
+        se3_rpy(current_se3, rpy_rad)
+        return np.concatenate([current_xyz, np.degrees(rpy_rad)])
 
     def do_setup(self, state: "ControllerState") -> None:
         """Pre-compute trajectory from current position."""

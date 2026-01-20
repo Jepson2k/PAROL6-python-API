@@ -4,16 +4,64 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 
 from parol6.config import get_com_port_with_fallback
 from parol6.server.transports import create_and_connect_transport, is_simulation_mode
-from parol6.server.transports.mock_serial_adapter import MockSerialProcessAdapter
+from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.serial_transport import SerialTransport
 
 logger = logging.getLogger("parol6.server.transport_manager")
+
+
+@njit(cache=True)
+def _arrays_changed(
+    pos: np.ndarray,
+    pos_last: np.ndarray,
+    spd: np.ndarray,
+    spd_last: np.ndarray,
+    aff: np.ndarray,
+    aff_last: np.ndarray,
+    io: np.ndarray,
+    io_last: np.ndarray,
+    grip: np.ndarray,
+    grip_last: np.ndarray,
+) -> bool:
+    """Check if any TX array has changed. Returns True on first difference (early exit)."""
+    for i in range(len(pos)):
+        if pos[i] != pos_last[i]:
+            return True
+    for i in range(len(spd)):
+        if spd[i] != spd_last[i]:
+            return True
+    for i in range(len(aff)):
+        if aff[i] != aff_last[i]:
+            return True
+    for i in range(len(io)):
+        if io[i] != io_last[i]:
+            return True
+    for i in range(len(grip)):
+        if grip[i] != grip_last[i]:
+            return True
+    return False
+
+
+@dataclass(slots=True)
+class TxCoalesceState:
+    """State for TX frame coalescing to avoid redundant writes."""
+
+    pos: np.ndarray
+    spd: np.ndarray
+    aff: np.ndarray
+    io: np.ndarray
+    grip: np.ndarray
+    cmd: int | None = None
+    tout: int | None = None
+    last_sent: float = 0.0
 
 
 class TransportManager:
@@ -40,12 +88,12 @@ class TransportManager:
         self.serial_port = serial_port
         self.serial_baudrate = serial_baudrate
 
-        self.transport: SerialTransport | MockSerialProcessAdapter | None = None
+        self.transport: SerialTransport | MockSerialTransport | None = None
         self.first_frame_received = False
         self._last_version = 0
 
         # TX coalescing state
-        self._last_tx: dict[str, Any] | None = None
+        self._last_tx: TxCoalesceState | None = None
 
     def initialize(self, state_arrays: dict[str, np.ndarray]) -> bool:
         """Create and connect initial transport.
@@ -68,16 +116,13 @@ class TransportManager:
             logger.debug(f"Failed to load persisted COM port: {e}")
 
         # Initialize TX coalescing state
-        self._last_tx = {
-            "pos": np.empty_like(state_arrays["Position_out"]),
-            "spd": np.empty_like(state_arrays["Speed_out"]),
-            "cmd": None,
-            "aff": np.empty_like(state_arrays["Affected_joint_out"]),
-            "io": np.empty_like(state_arrays["InOut_out"]),
-            "tout": None,
-            "grip": np.empty_like(state_arrays["Gripper_data_out"]),
-            "last_sent": 0.0,
-        }
+        self._last_tx = TxCoalesceState(
+            pos=np.empty_like(state_arrays["Position_out"]),
+            spd=np.empty_like(state_arrays["Speed_out"]),
+            aff=np.empty_like(state_arrays["Affected_joint_out"]),
+            io=np.empty_like(state_arrays["InOut_out"]),
+            grip=np.empty_like(state_arrays["Gripper_data_out"]),
+        )
 
         # Create transport
         if self.serial_port or is_simulation_mode():
@@ -176,7 +221,7 @@ class TransportManager:
         mode_str = "on" if enable else "off"
 
         # Skip if already in the desired mode
-        already_simulator = isinstance(self.transport, MockSerialProcessAdapter)
+        already_simulator = isinstance(self.transport, MockSerialTransport)
         if enable == already_simulator and self.transport is not None:
             logger.debug("Already in simulator mode=%s, skipping switch", mode_str)
             return True, None
@@ -203,7 +248,7 @@ class TransportManager:
             if (
                 enable
                 and sync_state is not None
-                and isinstance(self.transport, MockSerialProcessAdapter)
+                and isinstance(self.transport, MockSerialTransport)
             ):
                 try:
                     self.transport.sync_from_controller_state(sync_state)
@@ -284,16 +329,23 @@ class TransportManager:
         # Check if state has changed or keepalive needed
         now = time.perf_counter()
         dirty = (
-            (command_value != self._last_tx["cmd"])
-            or (int(timeout_out) != int(self._last_tx["tout"] or 0))
-            or not np.array_equal(position_out, self._last_tx["pos"])
-            or not np.array_equal(speed_out, self._last_tx["spd"])
-            or not np.array_equal(affected_joint_out, self._last_tx["aff"])
-            or not np.array_equal(inout_out, self._last_tx["io"])
-            or not np.array_equal(gripper_data_out, self._last_tx["grip"])
+            (command_value != self._last_tx.cmd)
+            or (int(timeout_out) != int(self._last_tx.tout or 0))
+            or _arrays_changed(
+                position_out,
+                self._last_tx.pos,
+                speed_out,
+                self._last_tx.spd,
+                affected_joint_out,
+                self._last_tx.aff,
+                inout_out,
+                self._last_tx.io,
+                gripper_data_out,
+                self._last_tx.grip,
+            )
         )
 
-        if not dirty and (now - self._last_tx["last_sent"] < keepalive_s):
+        if not dirty and (now - self._last_tx.last_sent < keepalive_s):
             return True  # No write needed
 
         # Write frame
@@ -309,14 +361,14 @@ class TransportManager:
             )
             if ok:
                 # Update last TX snapshot
-                self._last_tx["cmd"] = command_value
-                np.copyto(self._last_tx["pos"], position_out)
-                np.copyto(self._last_tx["spd"], speed_out)
-                np.copyto(self._last_tx["aff"], affected_joint_out)
-                np.copyto(self._last_tx["io"], inout_out)
-                self._last_tx["tout"] = int(timeout_out)
-                np.copyto(self._last_tx["grip"], gripper_data_out)
-                self._last_tx["last_sent"] = now
+                self._last_tx.cmd = command_value
+                np.copyto(self._last_tx.pos, position_out)
+                np.copyto(self._last_tx.spd, speed_out)
+                np.copyto(self._last_tx.aff, affected_joint_out)
+                np.copyto(self._last_tx.io, inout_out)
+                self._last_tx.tout = int(timeout_out)
+                np.copyto(self._last_tx.grip, gripper_data_out)
+                self._last_tx.last_sent = now
             return ok
         except Exception as e:
             logger.warning(f"Error writing frame: {e}")
@@ -337,16 +389,25 @@ class TransportManager:
         Args:
             state: ControllerState to sync from.
         """
-        if isinstance(self.transport, MockSerialProcessAdapter):
+        if isinstance(self.transport, MockSerialTransport):
             self.transport.sync_from_controller_state(state)
             # Skip stale frames
             _, ver, _ = self.transport.get_latest_frame_view()
             self._last_version = ver
 
+    def tick_simulation(self) -> None:
+        """Tick mock transport simulation if using MockSerialTransport.
+
+        Called by controller each loop iteration for lockstep simulation.
+        No-op for real serial transport.
+        """
+        if isinstance(self.transport, MockSerialTransport):
+            self.transport.tick_simulation()
+
     def _reset_tx_keepalive(self) -> None:
         """Reset TX keepalive to force prompt write."""
         if self._last_tx is not None:
-            self._last_tx["last_sent"] = 0.0
+            self._last_tx.last_sent = 0.0
 
     def _wait_for_first_frame(self, timeout: float = 0.5) -> bool:
         """Wait for first frame with timeout.

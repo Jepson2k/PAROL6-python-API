@@ -51,6 +51,7 @@ class SerialTransport:
         self.serial: serial.Serial | None = None
         self.last_reconnect_attempt = 0.0
         self.reconnect_interval = 1.0  # seconds between reconnect attempts
+        self._reconnect_failures = 0  # count consecutive failures to reduce log spam
 
         # Reduced-copy latest-frame infrastructure (reader thread will publish here)
         self._scratch = bytearray(4096)
@@ -88,38 +89,13 @@ class SerialTransport:
         Returns:
             True if connection successful, False otherwise
         """
-        if port:
-            self.port = port
-
-        if not self.port:
-            logger.warning("No serial port specified")
-            return False
-
-        try:
-            # Close existing connection if any
-            if self.serial and self.serial.is_open:
-                self.serial.close()
-
-            # Create new connection
-            self.serial = serial.Serial(
-                port=self.port, baudrate=self.baudrate, timeout=self.timeout
-            )
-
-            if self.serial.is_open:
-                logger.info(f"Connected to serial port: {self.port}")
-                return True
-            else:
-                logger.error(f"Failed to open serial port: {self.port}")
-                return False
-
-        except serial.SerialException as e:
-            logger.error(f"Serial connection error: {e}")
-            self.serial = None
-            return False
-        except Exception as e:
-            logger.error(f"Unexpected error connecting to serial: {e}")
-            self.serial = None
-            return False
+        # Reset failure counter on explicit connect call
+        self._reconnect_failures = 0
+        success = self._connect_internal(port, quiet=False)
+        if not success:
+            # Mark as failed so auto_reconnect logs at DEBUG level
+            self._reconnect_failures = 1
+        return success
 
     def disconnect(self) -> None:
         """Disconnect from the serial port."""
@@ -146,7 +122,9 @@ class SerialTransport:
         """
         Attempt to reconnect to the serial port if disconnected.
 
-        This implements a rate-limited reconnection attempt.
+        This implements a rate-limited reconnection attempt. After the first
+        failure, subsequent reconnection attempts are logged at DEBUG level
+        to reduce log spam.
 
         Returns:
             True if reconnection successful, False otherwise
@@ -160,10 +138,71 @@ class SerialTransport:
         self.last_reconnect_attempt = now
 
         if self.port:
-            logger.info(f"Attempting to reconnect to {self.port}...")
-            return self.connect(self.port)
+            # Log at INFO only on first attempt, DEBUG on subsequent
+            log_level = logging.DEBUG if self._reconnect_failures > 0 else logging.INFO
+            logger.log(log_level, f"Attempting to reconnect to {self.port}...")
+            success = self._connect_internal(
+                self.port, quiet=self._reconnect_failures > 0
+            )
+            if success:
+                if self._reconnect_failures > 0:
+                    logger.info(
+                        f"Reconnected to {self.port} after {self._reconnect_failures} failed attempts"
+                    )
+                self._reconnect_failures = 0
+            else:
+                self._reconnect_failures += 1
+            return success
 
         return False
+
+    def _connect_internal(self, port: str | None, quiet: bool = False) -> bool:
+        """
+        Internal connection logic with optional quiet mode for reduced logging.
+
+        Args:
+            port: Port to connect to
+            quiet: If True, log errors at DEBUG instead of ERROR
+
+        Returns:
+            True if connection successful, False otherwise
+        """
+        if port:
+            self.port = port
+
+        if not self.port:
+            if not quiet:
+                logger.warning("No serial port specified")
+            return False
+
+        try:
+            # Close existing connection if any
+            if self.serial and self.serial.is_open:
+                self.serial.close()
+
+            # Create new connection
+            self.serial = serial.Serial(
+                port=self.port, baudrate=self.baudrate, timeout=self.timeout
+            )
+
+            if self.serial.is_open:
+                logger.info(f"Connected to serial port: {self.port}")
+                return True
+            else:
+                log_level = logging.DEBUG if quiet else logging.ERROR
+                logger.log(log_level, f"Failed to open serial port: {self.port}")
+                return False
+
+        except serial.SerialException as e:
+            log_level = logging.DEBUG if quiet else logging.ERROR
+            logger.log(log_level, f"Serial connection error: {e}")
+            self.serial = None
+            return False
+        except Exception as e:
+            log_level = logging.DEBUG if quiet else logging.ERROR
+            logger.log(log_level, f"Unexpected error connecting to serial: {e}")
+            self.serial = None
+            return False
 
     def write_frame(
         self,

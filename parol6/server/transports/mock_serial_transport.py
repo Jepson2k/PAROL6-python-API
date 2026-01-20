@@ -8,9 +8,9 @@ controller code.
 """
 
 import logging
-import threading
 import time
 from dataclasses import dataclass, field
+from threading import Event
 
 import numpy as np
 
@@ -347,8 +347,6 @@ class MockSerialTransport:
         self._frame_mv = memoryview(self._frame_buf)[:52]
         self._frame_version = 0
         self._frame_ts = 0.0
-        self._reader_thread: threading.Thread | None = None
-        self._reader_running = False
 
         # Precompute motion simulation constants from LIMITS
         self._vmax_f = LIMITS.joint.hard.velocity_steps.astype(np.float64, copy=False)
@@ -356,12 +354,18 @@ class MockSerialTransport:
         lims = np.asarray(LIMITS.joint.position.steps, dtype=np.int64)
         self._jmin_f = lims[:, 0].astype(np.float64, copy=False)
         self._jmax_f = lims[:, 1].astype(np.float64, copy=False)
+        self._home_angles_deg = np.array(cfg.HOME_ANGLES_DEG, dtype=np.float64)
 
         # Scratch buffers for motion simulation (avoid per-tick allocations)
         self._prev_pos_f = np.zeros((6,), dtype=np.float64)
         self._scratch_f = np.zeros((6,), dtype=np.float64)
 
         self._state.last_update = time.perf_counter()
+
+        # Write initial frame so first read returns valid data
+        self._encode_payload_into(self._frame_mv)
+        self._frame_version = 1
+        self._frame_ts = time.time()
 
         logger.info("MockSerialTransport initialized - simulation mode active")
 
@@ -460,83 +464,61 @@ class MockSerialTransport:
         )
         return True
 
-    def _simulate_motion(self, dt: float) -> None:
-        """Simulate one step of robot motion."""
-        state = self._state
-        state.homing_countdown, state.command_out = _simulate_motion_jit(
-            state.position_f,
-            state.position_in,
-            state.speed_in,
-            state.speed_out,
-            state.position_out,
-            state.homed_in,
-            state.io_in,
-            self._prev_pos_f,
-            self._scratch_f,
-            self._vmax_f,
-            self._jmin_f,
-            self._jmax_f,
-            cfg.HOME_ANGLES_DEG,
-            state.command_out,
-            dt,
-            state.homing_countdown,
-            self._frame_interval,
-            CommandCode.HOME,
-            CommandCode.JOG,
-            CommandCode.MOVE,
-            CommandCode.IDLE,
-        )
+    def tick_simulation(self) -> None:
+        """
+        Run one physics simulation step. Called by controller each tick.
+
+        This advances the simulation by the elapsed time since last update,
+        encodes the new state into the frame buffer, and increments the
+        frame version for change detection.
+        """
+        if not self._connected:
+            return
+
+        now = time.perf_counter()
+        dt = now - self._state.last_update
+        self._state.last_update = now
+
+        if dt > 0:
+            state = self._state
+            state.homing_countdown, state.command_out = _simulate_motion_jit(
+                state.position_f,
+                state.position_in,
+                state.speed_in,
+                state.speed_out,
+                state.position_out,
+                state.homed_in,
+                state.io_in,
+                self._prev_pos_f,
+                self._scratch_f,
+                self._vmax_f,
+                self._jmin_f,
+                self._jmax_f,
+                self._home_angles_deg,
+                state.command_out,
+                dt,
+                state.homing_countdown,
+                self._frame_interval,
+                CommandCode.HOME,
+                CommandCode.JOG,
+                CommandCode.MOVE,
+                CommandCode.IDLE,
+            )
+
+        self._encode_payload_into(self._frame_mv)
+        self._frame_version += 1
+        self._frame_ts = time.time()
 
     # ================================
     # Latest-frame API (reduced-copy)
     # ================================
-    def start_reader(self, shutdown_event: threading.Event) -> threading.Thread:
+    def start_reader(self, shutdown_event: Event) -> None:
         """
-        Start simulated latest-frame publisher thread.
+        No-op for lockstep mode. Simulation is ticked by controller via tick_simulation().
+
+        Returns None since no reader thread is needed.
         """
-        if self._reader_thread and self._reader_thread.is_alive():
-            return self._reader_thread
-
-        def _run():
-            self._reader_running = True
-            period = self._frame_interval
-            next_deadline = time.perf_counter()
-
-            try:
-                while not shutdown_event.is_set():
-                    if not self._connected:
-                        time.sleep(0.05)
-                        continue
-
-                    now = time.perf_counter()
-                    if now >= next_deadline:
-                        # Advance simulation before publishing a new frame
-                        dt = now - self._state.last_update
-                        if dt > 0:
-                            self._simulate_motion(dt)
-                            self._state.last_update = now
-
-                        self._encode_payload_into(self._frame_mv)
-                        self._frame_version += 1
-                        self._frame_ts = time.time()
-
-                        # Advance deadline
-                        next_deadline += period
-                        # If we fell far behind, resync to avoid tight catch-up loop
-                        if next_deadline < now - period:
-                            next_deadline = now + period
-                    else:
-                        # Sleep until next deadline (or at most 2ms to stay responsive)
-                        sleep_time = min(next_deadline - now, 0.002)
-                        if sleep_time > 0:
-                            time.sleep(sleep_time)
-            finally:
-                self._reader_running = False
-
-        t = threading.Thread(target=_run, name="MockSerialReader", daemon=True)
-        self._reader_thread = t
-        t.start()
-        return t
+        return None
 
     def _encode_payload_into(self, out_mv: memoryview) -> None:
         """Build a 52-byte payload per firmware layout from simulated state."""

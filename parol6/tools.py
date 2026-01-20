@@ -9,19 +9,31 @@ from typing import Any
 
 import numpy as np
 
-from parol6.utils.se3_utils import se3_from_trans, se3_rx
+from parol6.utils.se3_utils import se3_from_trans, se3_mul, se3_rx
+
+
+def _make_pneumatic_transform() -> np.ndarray:
+    """Create the pneumatic gripper transform."""
+    trans = np.zeros((4, 4), dtype=np.float64)
+    rot = np.zeros((4, 4), dtype=np.float64)
+    out = np.zeros((4, 4), dtype=np.float64)
+    se3_from_trans(-0.04525, 0, 0, trans)
+    se3_rx(np.pi, rot)
+    se3_mul(trans, rot, out)
+    return out
+
 
 TOOL_CONFIGS: dict[str, dict[str, Any]] = {
     "NONE": {
         "name": "No Tool",
         "description": "Bare flange - no tool attached",
-        "transform": np.eye(4),
+        "transform": np.eye(4, dtype=np.float64),
         "stl_files": [],
     },
     "PNEUMATIC": {
         "name": "Pneumatic Gripper",
         "description": "Pneumatic gripper assembly",
-        "transform": (se3_from_trans(-0.04525, 0, 0) * se3_rx(np.pi)).matrix(),
+        "transform": _make_pneumatic_transform(),
         "stl_files": [
             {
                 "file": "pneumatic_gripper_assembly.STL",

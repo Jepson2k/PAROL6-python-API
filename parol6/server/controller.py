@@ -27,7 +27,7 @@ from parol6.server.command_registry import create_command_from_parts, discover_c
 from parol6.server.state import ControllerState, StateManager
 from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.async_logging import AsyncLogHandler
-from parol6.server.loop_timer import LoopTimer
+from parol6.server.loop_timer import LoopTimer, PhaseTimer, format_hz_summary
 from parol6.server.status_cache import get_cache
 from parol6.server.transport_manager import TransportManager
 from parol6.server.transports.udp_transport import UDPTransport
@@ -92,10 +92,8 @@ class Controller:
         except Exception as e:
             logger.error(f"Failed to create ACK socket: {e}")
 
-        # E-stop recovery
-        self.estop_active: bool | None = (
-            None  # None = unknown, True = active, False = released
-        )
+        # E-stop state tracking (start as released to avoid false positive on first check)
+        self.estop_active: bool = False
 
         # TX keepalive timeout
         self._tx_keepalive_s = float(os.getenv("PAROL6_TX_KEEPALIVE_S", "0.2"))
@@ -112,6 +110,15 @@ class Controller:
 
         # Helper classes
         self._timer = LoopTimer(self.config.loop_interval)
+        self._phase_timer = PhaseTimer(
+            [
+                "read",  # _read_from_firmware
+                "estop",  # _handle_estop
+                "execute",  # _execute_commands
+                "write",  # _write_to_firmware
+                "sim",  # tick_simulation
+            ]
+        )
         self._async_log = AsyncLogHandler()
         self._transport_mgr = TransportManager(
             shutdown_event=self.shutdown_event,
@@ -126,9 +133,6 @@ class Controller:
             sync_mock_from_state=self._transport_mgr.sync_mock_from_state,
             dt=self.config.loop_interval,
         )
-
-        # Periodic logging state
-        self._prev_print_time = 0.0
 
         # Initialize components on construction
         self._initialize_components()
@@ -261,6 +265,7 @@ class Controller:
 
         # Start main control loop
         logger.info("Starting main control loop")
+        self._timer.metrics.mark_started(time.perf_counter())
         self._main_control_loop()
 
     def stop(self):
@@ -377,67 +382,83 @@ class Controller:
                 state.Gripper_data_out[4] = 0
 
     def _sync_timer_metrics(self, state: ControllerState) -> None:
-        """Copy timing metrics from LoopTimer to controller state."""
-        state.loop_count = self._timer.metrics.loop_count
-        state.overrun_count = self._timer.metrics.overrun_count
-        state.last_period_s = self._timer.metrics.last_period_s
-        state.ema_period_s = self._timer.metrics.ema_period_s
+        """Copy timing metrics from LoopTimer and PhaseTimer to controller state."""
+        m = self._timer.metrics
+        state.loop_count = m.loop_count
+        state.overrun_count = m.overrun_count
+
+        # Only copy rolling stats when they were updated (every stats_interval loops)
+        if m.loop_count % self._timer._stats_interval == 0:
+            state.mean_period_s = m.mean_period_s
+            state.std_period_s = m.std_period_s
+            state.min_period_s = m.min_period_s
+            state.max_period_s = m.max_period_s
+            state.p95_period_s = m.p95_period_s
+            state.p99_period_s = m.p99_period_s
 
     def _log_periodic_status(self, state: ControllerState) -> None:
-        """Log performance metrics every 5 seconds."""
+        """Log performance metrics every 3 seconds."""
         now = time.perf_counter()
-        if now - self._prev_print_time <= 5:
+        m = self._timer.metrics
+
+        # Rate-limited overbudget warning (grace period handled in LoopMetrics)
+        should_warn, pct = m.check_degraded(now, 0.25, 3.0)
+        if should_warn:
+            logger.warning("loop overbudget by +%.0f%% (%s)", pct, format_hz_summary(m))
+
+        # Rate-limited debug log every 3s
+        if not m.should_log(now, 3.0):
             return
-
-        self._prev_print_time = now
-        tick = self._timer.interval
-
-        # Warn if average period degraded >10% vs target
-        if state.ema_period_s > tick * 1.10:
-            logger.warning(
-                f"Control loop avg period degraded by +{((state.ema_period_s / tick) - 1.0) * 100.0:.0f}% "
-                f"(avg={state.ema_period_s:.4f}s target={tick:.4f}s)"
-            )
 
         # Calculate command frequency
         cmd_hz = 0.0
         if state.ema_command_period_s > 0.0:
             cmd_hz = 1.0 / state.ema_command_period_s
 
-        # Calculate short-term command rate from recent timestamps
-        short_term_cmd_hz = 0.0
-        if len(state.command_timestamps) >= 2:
-            time_span = state.command_timestamps[-1] - state.command_timestamps[0]
-            if time_span > 0:
-                short_term_cmd_hz = (len(state.command_timestamps) - 1) / time_span
-
         logger.debug(
-            "loop=%.2fHz cmd=%.2fHz s=%.2f/%d q=%d ov=%d",
-            (1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0,
+            "loop: %s cmd=%.1fHz ov=%d",
+            format_hz_summary(m),
             cmd_hz,
-            short_term_cmd_hz,
-            max(0, len(state.command_timestamps) - 1),
-            state.command_count,
             state.overrun_count,
+        )
+
+        # Log phase breakdown (p99 values to catch spikes)
+        phases = self._phase_timer.phases
+        logger.debug(
+            "phases p99: read=%.2fms estop=%.2fms exec=%.2fms write=%.2fms sim=%.2fms",
+            phases["read"].p99_s * 1000,
+            phases["estop"].p99_s * 1000,
+            phases["execute"].p99_s * 1000,
+            phases["write"].p99_s * 1000,
+            phases["sim"].p99_s * 1000,
         )
 
     def _main_control_loop(self):
         """Main control loop with phase-based structure and precise timing."""
         self._timer.start()
-        self._prev_print_time = time.perf_counter()
+        pt = self._phase_timer
 
         while self.running:
             try:
                 state = self.state_manager.get_state()
 
-                self._read_from_firmware(state)
-                self._handle_estop(state)
+                with pt.phase("read"):
+                    self._read_from_firmware(state)
+
+                with pt.phase("estop"):
+                    self._handle_estop(state)
 
                 if not self.estop_active:
-                    self._execute_commands(state)
+                    with pt.phase("execute"):
+                        self._execute_commands(state)
 
-                self._write_to_firmware(state)
+                with pt.phase("write"):
+                    self._write_to_firmware(state)
 
+                with pt.phase("sim"):
+                    self._transport_mgr.tick_simulation()
+
+                pt.tick()
                 self._sync_timer_metrics(state)
                 self._log_periodic_status(state)
                 self._timer.wait_for_next_tick()

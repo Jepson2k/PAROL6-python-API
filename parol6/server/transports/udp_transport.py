@@ -118,13 +118,12 @@ class UDPTransport:
             if nbytes <= 0:
                 return None
             try:
-                # Decode ASCII payload and trim only CR/LF to avoid extra copies
+                # Decode ASCII payload - only strip if needed to avoid extra allocation
                 message_str = (
-                    self._rxv[:nbytes]
-                    .tobytes()
-                    .decode("ascii", errors="ignore")
-                    .rstrip("\r\n")
+                    self._rxv[:nbytes].tobytes().decode("ascii", errors="ignore")
                 )
+                if message_str.endswith(("\r", "\n")):
+                    message_str = message_str.rstrip("\r\n")
             except Exception:
                 logger.warning(f"Failed to decode UDP datagram from {address}")
                 return None

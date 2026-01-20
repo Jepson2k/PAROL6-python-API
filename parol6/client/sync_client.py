@@ -11,7 +11,8 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, Literal, TypeVar
 
-from ..protocol.types import Axis, Frame, PingResult, StatusAggregate
+from ..protocol.types import Axis, Frame, PingResult
+from ..protocol.wire import StatusBuffer
 from .async_client import AsyncRobotClient
 
 T = TypeVar("T")
@@ -435,7 +436,7 @@ class RobotClient:
         )
 
     def wait_for_status(
-        self, predicate: Callable[[StatusAggregate], bool], timeout: float = 5.0
+        self, predicate: Callable[[StatusBuffer], bool], timeout: float = 5.0
     ) -> bool:
         """
         Wait until a multicast status satisfies predicate(status) within timeout.

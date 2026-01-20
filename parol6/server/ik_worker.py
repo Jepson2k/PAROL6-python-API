@@ -10,10 +10,9 @@ import signal
 from multiprocessing.synchronize import Event
 
 import numpy as np
-import sophuspy as sp
 from numba import njit  # type: ignore[import-untyped]
 
-from parol6.utils.se3_numba import (
+from parol6.utils.se3_utils import (
     se3_from_trans,
     se3_mul,
     se3_rx,
@@ -248,9 +247,7 @@ def _compute_cart_enable(
     # Check IK for each target
     for i in range(12):
         try:
-            # Convert numpy 4x4 matrix to sp.SE3 for solve_ik
-            target_se3 = sp.SE3(targets[i])
-            ik = solve_ik(robot, target_se3, q_rad, quiet_logging=True)
+            ik = solve_ik(robot, targets[i], q_rad, quiet_logging=True)
             out[i] = 1 if ik.success else 0
         except Exception:
             out[i] = 0

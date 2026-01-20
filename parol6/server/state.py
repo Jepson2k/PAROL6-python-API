@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
 
 import numpy as np
-import sophuspy as sp
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import steps_to_rad
@@ -139,8 +138,14 @@ class ControllerState:
     # Control loop runtime metrics (used by benchmarks/monitoring)
     loop_count: int = 0
     overrun_count: int = 0
-    last_period_s: float = 0.0
-    ema_period_s: float = 0.0
+
+    # Rolling statistics from loop timer
+    mean_period_s: float = 0.0
+    std_period_s: float = 0.0
+    min_period_s: float = 0.0
+    max_period_s: float = 0.0
+    p95_period_s: float = 0.0
+    p99_period_s: float = 0.0
 
     # Command frequency metrics
     command_count: int = 0
@@ -153,9 +158,6 @@ class ControllerState:
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
     _fkine_last_tool: str = ""
-    _fkine_se3: Any = field(
-        default_factory=sp.SE3
-    )  # sophuspy SE3 instance (pre-allocated)
     _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
     _fkine_flat_mm: np.ndarray = field(
         default_factory=lambda: np.zeros((16,), dtype=np.float64)
@@ -163,6 +165,10 @@ class ControllerState:
     _fkine_q_rad: np.ndarray = field(
         default_factory=lambda: np.zeros((6,), dtype=np.float64)
     )
+
+    def __post_init__(self) -> None:
+        """Initialize E-stop to released state after field initialization."""
+        self.InOut_in[4] = 1  # E-STOP released (0=pressed, 1=released)
 
     def reset(self) -> None:
         """
@@ -401,10 +407,6 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         # Cache as 4x4 matrix (zero-allocation: copy directly into pre-allocated buffer)
         np.copyto(state._fkine_mat, T_raw.A)
 
-        # Update sophuspy SE3 in-place (avoids allocation vs creating new SE3)
-        state._fkine_se3.setRotationMatrix(state._fkine_mat[:3, :3])
-        state._fkine_se3.setTranslation(state._fkine_mat[:3, 3])
-
         # Cache as flattened 16-vector with mm translation (zero-allocation)
         # Use flat view of _fkine_mat, then copy with scaling into _fkine_flat_mm
         state._fkine_flat_mm[:] = state._fkine_mat.ravel()
@@ -417,20 +419,20 @@ def ensure_fkine_updated(state: ControllerState) -> None:
         state._fkine_last_tool = state.current_tool
 
 
-def get_fkine_se3(state: ControllerState | None = None) -> sp.SE3:
+def get_fkine_se3(state: ControllerState | None = None) -> np.ndarray:
     """
-    Get the current end-effector pose as a sophuspy SE3 object.
+    Get the current end-effector pose as a 4x4 SE3 transformation matrix.
     Automatically updates cache if needed.
 
     Returns
     -------
-    sp.SE3
-        Current end-effector pose
+    np.ndarray
+        4x4 SE3 transformation matrix (translation in meters)
     """
     if state is None:
         state = get_state()
     ensure_fkine_updated(state)
-    return state._fkine_se3
+    return state._fkine_mat
 
 
 def get_fkine_matrix(state: ControllerState | None = None) -> np.ndarray:

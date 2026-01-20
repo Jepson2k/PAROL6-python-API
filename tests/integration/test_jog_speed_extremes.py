@@ -147,7 +147,7 @@ class TestCartesianJogSpeedExtremes:
         assert initial_pose is not None, "Failed to get initial pose"
         assert len(initial_pose) == 6, "Expected 6-element pose [x,y,z,rx,ry,rz]"
 
-        # Cartesian jog in +X direction at slowest speed (1%)
+        # Cartesian jog in +Y direction at slowest speed (1%)
         result = client.jog_cartesian(
             frame="WRF",
             axis="Y+",
@@ -163,12 +163,12 @@ class TestCartesianJogSpeedExtremes:
         final_pose = client.get_pose_rpy()
         assert final_pose is not None, "Failed to get final pose"
 
-        # Verify position actually changed (check X coordinate primarily)
-        position_change = abs(final_pose[0] - initial_pose[0])
+        # Verify position actually changed (check Y coordinate)
+        position_change = abs(final_pose[1] - initial_pose[1])
         assert position_change > 0.001, (
-            f"Expected X position to change at slowest cart jog speed (1%), but "
-            f"changed by only {position_change:.4f} mm (initial={initial_pose[0]:.4f}, "
-            f"final={final_pose[0]:.4f})"
+            f"Expected Y position to change at slowest cart jog speed (1%), but "
+            f"changed by only {position_change:.4f} mm (initial={initial_pose[1]:.4f}, "
+            f"final={final_pose[1]:.4f})"
         )
 
     def test_cart_jog_fastest_speed_moves_robot(self, client: RobotClient, server_proc):

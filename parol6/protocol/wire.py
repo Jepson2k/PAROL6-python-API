@@ -7,17 +7,53 @@ response payloads used by the headless controller.
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 # Centralized binary wire protocol helpers (pack/unpack + codes)
 from enum import IntEnum
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 
-from .types import Axis, Frame, PingResult, StatusAggregate
+from .types import Axis, Frame, PingResult
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StatusBuffer:
+    """Preallocated buffer for zero-allocation status parsing.
+
+    All numeric arrays are numpy for cache-friendly access and potential numba use.
+    Use decode_status_into() to fill this buffer without allocating new objects.
+    """
+
+    pose: np.ndarray = field(default_factory=lambda: np.zeros(16, dtype=np.float64))
+    angles: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
+    speeds: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.float64))
+    io: np.ndarray = field(default_factory=lambda: np.zeros(5, dtype=np.int32))
+    gripper: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    joint_en: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=np.int32))
+    cart_en_wrf: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=np.int32))
+    cart_en_trf: np.ndarray = field(default_factory=lambda: np.ones(12, dtype=np.int32))
+    action_current: str = ""
+    action_state: str = ""
+
+    def copy(self) -> "StatusBuffer":
+        """Return a deep copy with all arrays copied."""
+        return StatusBuffer(
+            pose=self.pose.copy(),
+            angles=self.angles.copy(),
+            speeds=self.speeds.copy(),
+            io=self.io.copy(),
+            gripper=self.gripper.copy(),
+            joint_en=self.joint_en.copy(),
+            cart_en_wrf=self.cart_en_wrf.copy(),
+            cart_en_trf=self.cart_en_trf.copy(),
+            action_current=self.action_current,
+            action_state=self.action_state,
+        )
 
 
 @njit(cache=True)
@@ -384,11 +420,8 @@ def decode_ping(resp: str) -> PingResult | None:
     """
     if not resp or not resp.startswith("PONG"):
         return None
-    serial_connected = False
-    if "SERIAL=" in resp:
-        serial_part = resp.split("SERIAL=", 1)[-1].split("|")[0].strip()
-        serial_connected = serial_part.startswith("1")
-    return {"serial_connected": serial_connected, "raw": resp}
+    serial_connected = "SERIAL=1" in resp
+    return PingResult(serial_connected=serial_connected, raw=resp)
 
 
 def decode_simple(
@@ -437,13 +470,13 @@ def decode_simple(
             return None
 
 
-def decode_status(resp: str) -> StatusAggregate | None:
+def decode_status(resp: str) -> dict | None:
     """
     Decode aggregate status:
       STATUS|POSE=p0,p1,...,p15|ANGLES=a0,...,a5|SPEEDS=s0,...,s5|IO=in1,in2,out1,out2,estop|GRIPPER=id,pos,spd,cur,status,obj|
              ACTION_CURRENT=...|ACTION_STATE=...
 
-    Returns a dict matching StatusAggregate or None on parse failure.
+    Returns a dict or None on parse failure. For zero-allocation parsing, use decode_status_into().
     """
     if not resp or not resp.startswith("STATUS|"):
         return None
@@ -502,4 +535,73 @@ def decode_status(resp: str) -> StatusAggregate | None:
     ):
         return None
 
-    return cast(StatusAggregate, result)
+    return result
+
+
+def _parse_floats_into(csv: str, out: np.ndarray) -> int:
+    """Parse comma-separated floats into preallocated array. Returns count parsed."""
+    idx = 0
+    max_idx = len(out)
+    for part in csv.split(","):
+        if part and idx < max_idx:
+            out[idx] = float(part)
+            idx += 1
+    return idx
+
+
+def _parse_ints_into(csv: str, out: np.ndarray) -> int:
+    """Parse comma-separated ints into preallocated array. Returns count parsed."""
+    idx = 0
+    max_idx = len(out)
+    for part in csv.split(","):
+        if part and idx < max_idx:
+            out[idx] = int(part)
+            idx += 1
+    return idx
+
+
+def decode_status_into(resp: str, buf: StatusBuffer) -> bool:
+    """Zero-allocation decode of STATUS message into preallocated buffer.
+
+    Parses the same format as decode_status() but fills preallocated numpy arrays
+    instead of creating new lists. Use this in hot paths (e.g., 20-50Hz status updates)
+    to avoid GC pressure.
+
+    All fields are always present in the status message from the broadcaster.
+
+    Args:
+        resp: Raw STATUS response string
+        buf: Preallocated StatusBuffer to fill
+
+    Returns:
+        True if the message was a valid STATUS message, False otherwise.
+    """
+    if not resp or not resp.startswith("STATUS|"):
+        return False
+
+    # Split top-level sections after "STATUS|"
+    sections = resp.split("|")[1:]
+
+    for sec in sections:
+        if sec.startswith("POSE="):
+            _parse_floats_into(sec[5:], buf.pose)
+        elif sec.startswith("ANGLES="):
+            _parse_floats_into(sec[7:], buf.angles)
+        elif sec.startswith("SPEEDS="):
+            _parse_floats_into(sec[7:], buf.speeds)
+        elif sec.startswith("IO="):
+            _parse_ints_into(sec[3:], buf.io)
+        elif sec.startswith("GRIPPER="):
+            _parse_ints_into(sec[8:], buf.gripper)
+        elif sec.startswith("ACTION_CURRENT="):
+            buf.action_current = sec[15:]
+        elif sec.startswith("ACTION_STATE="):
+            buf.action_state = sec[13:]
+        elif sec.startswith("JOINT_EN="):
+            _parse_ints_into(sec[9:], buf.joint_en)
+        elif sec.startswith("CART_EN_WRF="):
+            _parse_ints_into(sec[12:], buf.cart_en_wrf)
+        elif sec.startswith("CART_EN_TRF="):
+            _parse_ints_into(sec[12:], buf.cart_en_trf)
+
+    return True

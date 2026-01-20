@@ -8,7 +8,7 @@ import json
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable
 from typing import Literal, cast
 
 import numpy as np
@@ -16,14 +16,12 @@ import numpy as np
 from .. import config as cfg
 from ..utils.se3_utils import so3_rpy
 from ..ack_policy import QUERY_COMMANDS, SYSTEM_COMMANDS, AckPolicy
-from ..client.status_subscriber import subscribe_status
+from ..client.status_subscriber import subscribe_status_into
 from ..protocol import wire
-from ..protocol.types import Axis, Frame, PingResult, StatusAggregate
+from ..protocol.types import Axis, Frame, PingResult
+from ..protocol.wire import StatusBuffer
 
 logger = logging.getLogger(__name__)
-
-# Sentinel used to signal status_stream termination
-_STATUS_SENTINEL = cast(StatusAggregate, object())
 
 
 class _UDPClientProtocol(asyncio.DatagramProtocol):
@@ -84,9 +82,11 @@ class AsyncRobotClient:
         # ACK policy
         self._ack_policy = AckPolicy.from_env(lambda: self._stream_mode)
 
-        # Multicast listener using subscribe_status
+        # Shared status state (single buffer, condition-based notification)
         self._multicast_task: asyncio.Task | None = None
-        self._status_queue: asyncio.Queue[StatusAggregate] = asyncio.Queue(maxsize=100)
+        self._shared_status: StatusBuffer = StatusBuffer()
+        self._status_generation: int = 0
+        self._status_condition: asyncio.Condition = asyncio.Condition()
 
         # Lifecycle flag
         self._closed: bool = False
@@ -162,29 +162,22 @@ class AsyncRobotClient:
             pass
 
         async def _listener():
-            """Consume status broadcasts and queue them."""
+            """Zero-allocation status consumption into shared buffer.
+
+            Uses subscribe_status_into() to decode directly into _shared_status.
+            Consumers are notified via condition variable and read the shared buffer.
+            Slow consumers automatically skip to the latest status (desired for real-time).
+            """
             try:
-                async for status in subscribe_status():
-                    # Exit promptly if the client is closing
+                async for _ in subscribe_status_into(self._shared_status):
                     if self._closed:
                         break
-
-                    # Put in queue, drop old if full
-                    if self._status_queue.full():
-                        try:
-                            self._status_queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            pass
-                    try:
-                        self._status_queue.put_nowait(status)
-                    except asyncio.QueueFull:
-                        pass
+                    async with self._status_condition:
+                        self._status_generation += 1
+                        self._status_condition.notify_all()
             except asyncio.CancelledError:
-                # Normal shutdown path; propagate cancellation so the task
-                # is marked as cancelled and can be awaited cleanly.
                 raise
             except Exception:
-                # Subscriber ended unexpectedly, could retry but for now just exit
                 pass
 
         # Start listener task
@@ -202,12 +195,15 @@ class AsyncRobotClient:
         logging.debug("Closing Client...")
         self._closed = True
 
-        # status_stream consumers will be signaled via sentinel after stopping the multicast listener.
+        # Wake all status_stream consumers via condition
+        try:
+            async with self._status_condition:
+                self._status_condition.notify_all()
+        except RuntimeError:
+            pass  # Event loop may be closed
 
         # Stop multicast listener
         if self._multicast_task is not None:
-            # Guard against canceling a task whose event loop is already closed
-            # (can happen in test teardown when close() runs on a new loop)
             try:
                 self._multicast_task.cancel()
             except RuntimeError:
@@ -216,13 +212,6 @@ class AsyncRobotClient:
                 await self._multicast_task
             self._multicast_task = None
 
-        # Wake status_stream consumer(s) promptly: clear queue then enqueue sentinel so it's next
-        with contextlib.suppress(Exception):
-            while not self._status_queue.empty():
-                self._status_queue.get_nowait()
-        with contextlib.suppress(asyncio.QueueFull):
-            self._status_queue.put_nowait(_STATUS_SENTINEL)
-
         # Close UDP transport
         if self._transport is not None:
             with contextlib.suppress(Exception):
@@ -230,8 +219,7 @@ class AsyncRobotClient:
             self._transport = None
             self._protocol = None
 
-        # Best-effort drain for RX queue to free memory.
-        # Do not drain status_queue here to ensure sentinel reaches consumers.
+        # Best-effort drain for RX queue to free memory
         with contextlib.suppress(Exception):
             while not self._rx_queue.empty():
                 self._rx_queue.get_nowait()
@@ -244,23 +232,59 @@ class AsyncRobotClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def status_stream(self) -> AsyncIterator[StatusAggregate]:
+    async def status_stream(self) -> AsyncIterator[StatusBuffer]:
         """Async generator that yields status updates from multicast broadcasts.
 
         Usage:
             async for status in client.status_stream():
-                print(f"Speeds: {status.get('speeds')}")
+                print(f"Angles: {status.angles}")
 
         This generator terminates automatically when :meth:`close` is
         called on the client, so callers do not need to manually cancel
         their consumer tasks.
+
+        Each yielded StatusBuffer is a copy - safe to store or process async.
+        For zero-copy hot paths, use :meth:`status_stream_shared` instead.
+
+        Slow consumers automatically skip to the latest state (desired for real-time).
+        """
+        async for status in self.status_stream_shared():
+            yield status.copy()
+
+    async def status_stream_shared(self) -> AsyncIterator[StatusBuffer]:
+        """Zero-copy async generator that yields the shared status buffer.
+
+        Usage:
+            async for status in client.status_stream_shared():
+                # Process immediately - don't store references
+                print(f"Angles: {status.angles}")
+
+        WARNING: The same buffer instance is yielded on every iteration.
+        Do not store references to the yielded object - data will be
+        overwritten on the next iteration. For safe storage, use
+        :meth:`status_stream` or call status.copy().
+
+        This generator terminates automatically when :meth:`close` is
+        called on the client.
+
+        Slow consumers automatically skip to the latest state (desired for real-time).
         """
         await self._ensure_endpoint()
-        while True:
-            item = await self._status_queue.get()
-            if item is _STATUS_SENTINEL:
-                break
-            yield item
+        last_gen = 0
+
+        while not self._closed:
+            async with self._status_condition:
+                while self._status_generation == last_gen and not self._closed:
+                    try:
+                        await asyncio.wait_for(
+                            self._status_condition.wait(), timeout=2.0
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                if self._closed:
+                    break
+                last_gen = self._status_generation
+            yield self._shared_status
 
     async def _send(self, message: str) -> bool:
         """
@@ -661,7 +685,9 @@ class AsyncRobotClient:
                 ]
             )
             # Use xyz convention (rx, ry, rz) - Roll-Pitch-Yaw
-            rpy_deg = so3_rpy(R, degrees=True)
+            rpy_rad = np.zeros(3, dtype=np.float64)
+            so3_rpy(R, rpy_rad)
+            rpy_deg = np.degrees(rpy_rad)
             return [x, y, z, rpy_deg[0], rpy_deg[1], rpy_deg[2]]
         except (ValueError, IndexError, ImportError):
             return None
@@ -728,25 +754,22 @@ class AsyncRobotClient:
         timeout_task = asyncio.create_task(asyncio.sleep(timeout))
 
         try:
-            async for status in self.status_stream():
+            async for status in self.status_stream_shared():
                 if timeout_task.done():
                     return False
 
-                # Check speeds and angles from status
-                speeds = status.get("speeds")
-                angles = status.get("angles")
+                # Check speeds and angles from status (direct attribute access)
+                speeds = status.speeds
+                angles = status.angles
 
-                max_speed = None
-                if speeds and isinstance(speeds, Iterable):
-                    max_speed = max(abs(s) for s in speeds)
+                max_speed = max(abs(s) for s in speeds)
 
                 max_angle_change = None
-                if angles and last_angles is not None:
+                if last_angles is not None:
                     max_angle_change = max(
                         abs(a - b) for a, b in zip(angles, last_angles, strict=False)
                     )
-                if angles:
-                    last_angles = angles
+                last_angles = angles.copy()  # Copy since status buffer is shared
 
                 # Phase 1: Wait for motion to start
                 if not motion_started:
@@ -811,24 +834,34 @@ class AsyncRobotClient:
         return False
 
     async def wait_for_status(
-        self, predicate: Callable[[StatusAggregate], bool], timeout: float = 5.0
+        self, predicate: Callable[[StatusBuffer], bool], timeout: float = 5.0
     ) -> bool:
         """Wait until a multicast status satisfies predicate(status) within timeout."""
         await self._ensure_endpoint()
+        last_gen = 0
         end_time = time.time() + timeout
-        while time.time() < end_time:
-            remaining = max(0.0, end_time - time.time())
+
+        while time.time() < end_time and not self._closed:
+            async with self._status_condition:
+                while self._status_generation == last_gen and not self._closed:
+                    remaining = max(0.0, end_time - time.time())
+                    if remaining <= 0:
+                        return False
+                    try:
+                        await asyncio.wait_for(
+                            self._status_condition.wait(),
+                            timeout=min(remaining, 0.5),
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                if self._closed:
+                    return False
+                last_gen = self._status_generation
+
             try:
-                status = await asyncio.wait_for(
-                    self._status_queue.get(), timeout=remaining
-                )
-            except (asyncio.TimeoutError, TimeoutError):
-                break
-            try:
-                if predicate(status):
+                if predicate(self._shared_status):
                     return True
             except Exception:
-                # Ignore predicate exceptions from tests
                 pass
         return False
 

@@ -216,14 +216,18 @@ class GetLoopStatsCommand(QueryCommand):
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         target_hz = 1.0 / max(cfg.INTERVAL_S, 1e-9)
-        ema_hz = (1.0 / state.ema_period_s) if state.ema_period_s > 0.0 else 0.0
+        mean_hz = (1.0 / state.mean_period_s) if state.mean_period_s > 0.0 else 0.0
         payload = {
             "target_hz": float(target_hz),
             "loop_count": int(state.loop_count),
             "overrun_count": int(state.overrun_count),
-            "last_period_s": float(state.last_period_s),
-            "ema_period_s": float(state.ema_period_s),
-            "ema_hz": float(ema_hz),
+            "mean_period_s": float(state.mean_period_s),
+            "std_period_s": float(state.std_period_s),
+            "min_period_s": float(state.min_period_s),
+            "max_period_s": float(state.max_period_s),
+            "p95_period_s": float(state.p95_period_s),
+            "p99_period_s": float(state.p99_period_s),
+            "mean_hz": float(mean_hz),
         }
         self.reply_json("LOOP_STATS", payload)
         self.finish()

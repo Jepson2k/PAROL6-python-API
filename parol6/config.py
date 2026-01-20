@@ -80,6 +80,9 @@ STATUS_UNICAST_HOST: str = os.getenv("PAROL6_STATUS_UNICAST_HOST", "127.0.0.1")
 STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
 STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
 
+# Loop timing tuning - busy threshold before deadline to switch from sleep to busy-wait
+BUSY_THRESHOLD_MS: float = float(os.getenv("PAROL6_BUSY_THRESHOLD_MS", "1.0"))
+
 
 # Ack/Tracking policy toggles
 def _env_bool_optional(name: str) -> bool | None:
@@ -521,9 +524,9 @@ if np.any(LIMITS.joint.hard.velocity <= 0) or np.any(
 ):
     raise ValueError("Joint limits must be positive. Check PAROL6_ROBOT config.")
 
-# Jog min speeds (arbitrary minimums for speed% mapping)
-JOG_MIN_STEPS: int = 100  # steps/s (same for all joints)
-CART_LIN_JOG_MIN: float = 1.0  # mm/s
+# Jog min speeds - derived from control rate (1 step per tick minimum)
+JOG_MIN_STEPS: int = int(CONTROL_RATE_HZ)  # steps/s
+CART_LIN_JOG_MIN: float = CONTROL_RATE_HZ / 100  # mm/s (scales with control rate)
 CART_ANG_JOG_MIN: float = 1.0  # deg/s
 
 # Per-joint IK safety margins (radians) - [min_margin, max_margin] per joint

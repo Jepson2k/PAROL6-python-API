@@ -105,10 +105,10 @@ class TestStreamingCartesianAccuracy:
             # This pattern catches bugs where reference pose gets corrupted
             # between moves (like the FK cache aliasing bug)
             offsets = [
-                (30.0, 0.0, 0.0),  # +10mm X
-                (30.0, 30.0, 0.0),  # +10mm X, +10mm Y
-                (30.0, 30.0, -30.0),  # +10mm X, +10mm Y, -10mm Z
-                (0.0, 30.0, -30.0),  # back toward start X
+                (30.0, 0.0, 0.0),  # +30mm X
+                (30.0, 30.0, 0.0),  # +30mm X, +30mm Y
+                (30.0, 30.0, -30.0),  # +30mm X, +30mm Y, -30mm Z
+                (-30.0, -30.0, -30.0),  # back toward start
                 (0.0, 0.0, 0.0),  # back to start
             ]
 

@@ -6,6 +6,7 @@ import threading
 import time
 
 from parol6 import config as cfg
+from parol6.server.loop_timer import LoopMetrics, format_hz_summary
 from parol6.server.state import StateManager
 from parol6.server.status_cache import get_cache
 
@@ -59,15 +60,14 @@ class StatusBroadcaster(threading.Thread):
         self._running = threading.Event()
         self._running.set()
 
-        # EMA rate tracking for TX
-        self._tx_count = 0
-        self._tx_last_time = time.monotonic()
-        self._tx_ema_period = 1.0 / rate_hz  # Initialize with expected period
-        self._tx_last_log_time = time.monotonic()  # For 3-second logging interval
+        # Rolling metrics for TX timing
+        self._metrics = LoopMetrics()
+        self._metrics.configure(1.0 / rate_hz, int(cfg.STATUS_RATE_HZ))
 
         # Failure tracking for runtime fallback
         self._send_failures = 0
         self._max_send_failures = 3
+        self._last_fail_log_time = 0.0
 
     def _detect_primary_ip(self) -> str:
         tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -197,6 +197,7 @@ class StatusBroadcaster(threading.Thread):
     def run(self) -> None:
         self._setup_socket()
         cache = get_cache()
+        self._metrics.mark_started(time.monotonic())
 
         # Validate socket exists
         if self._sock is None:
@@ -233,9 +234,10 @@ class StatusBroadcaster(threading.Thread):
                 except OSError as e:
                     self._send_failures += 1
                     # Log occasionally to avoid flooding
-                    if time.monotonic() - self._tx_last_log_time >= 5.0:
+                    now = time.monotonic()
+                    if now - self._last_fail_log_time >= 5.0:
                         logger.warning(f"StatusBroadcaster send failed: {e}")
-                        self._tx_last_log_time = time.monotonic()
+                        self._last_fail_log_time = now
                     # If too many failures and we are on multicast, fall back to unicast
                     if (
                         not self._use_unicast
@@ -248,25 +250,23 @@ class StatusBroadcaster(threading.Thread):
                 else:
                     # Reset failure count on success
                     self._send_failures = 0
-                    # Track TX rate with EMA
-                    now = time.monotonic()
-                    if self._tx_count > 0:  # Skip first sample for period calculation
-                        period = now - self._tx_last_time
-                        if period > 0:
-                            # EMA update: 0.1 * new + 0.9 * old
-                            self._tx_ema_period = (
-                                0.1 * period + 0.9 * self._tx_ema_period
-                            )
-                    self._tx_last_time = now
-                    self._tx_count += 1
 
-                    # Log rate every 3 seconds
-                    if now - self._tx_last_log_time >= 3.0 and self._tx_ema_period > 0:
-                        tx_hz = 1.0 / self._tx_ema_period
-                        logger.debug(
-                            f"Status TX: {tx_hz:.1f} Hz (count={self._tx_count})"
+                    # Track TX timing with LoopMetrics
+                    now = time.monotonic()
+                    self._metrics.tick(now)
+
+                    # Rate-limited overbudget warning (grace period handled in LoopMetrics)
+                    should_warn, pct = self._metrics.check_degraded(now, 0.25, 3.0)
+                    if should_warn:
+                        logger.warning(
+                            "status_tx overbudget by +%.0f%% (%s)",
+                            pct,
+                            format_hz_summary(self._metrics),
                         )
-                        self._tx_last_log_time = now
+
+                    # Rate-limited debug log every 3s
+                    if self._metrics.should_log(now, 3.0):
+                        logger.debug("status_tx: %s", format_hz_summary(self._metrics))
 
             # Sleep until next deadline (compensates for work time)
             sleep_time = next_deadline - time.monotonic()

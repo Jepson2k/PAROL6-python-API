@@ -1,17 +1,432 @@
 """Loop timing with hybrid sleep + busy-loop for precise deadline scheduling."""
 
 import time
-from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+from numba import njit, int64, float64  # type: ignore[import-untyped]
+from numba.experimental import jitclass  # type: ignore[import-untyped]
+
+from parol6 import config as cfg
+
+if TYPE_CHECKING:
+    from typing import Self
 
 
-@dataclass
+# =============================================================================
+# Constants for power-of-2 buffer operations
+# =============================================================================
+BUFFER_SIZE = 1024  # Power of 2 for fast modulo via bitmask
+BUFFER_MASK = BUFFER_SIZE - 1  # 1023 for & operation
+
+
+# =============================================================================
+# Numba-accelerated statistics functions
+# =============================================================================
+
+
+@njit(cache=True)
+def _quickselect_partition(arr: np.ndarray, left: int, right: int) -> int:
+    """Partition array around last element as pivot. Returns pivot index."""
+    pivot = arr[right]
+    i = left - 1
+    for j in range(left, right):
+        if arr[j] <= pivot:
+            i += 1
+            arr[i], arr[j] = arr[j], arr[i]
+    arr[i + 1], arr[right] = arr[right], arr[i + 1]
+    return i + 1
+
+
+@njit(cache=True)
+def _quickselect(arr: np.ndarray, k: int) -> float:
+    """Find k-th smallest element in-place. Modifies arr."""
+    left = 0
+    right = len(arr) - 1
+    while left < right:
+        pivot_idx = _quickselect_partition(arr, left, right)
+        if pivot_idx == k:
+            return arr[k]
+        elif pivot_idx < k:
+            left = pivot_idx + 1
+        else:
+            right = pivot_idx - 1
+    return arr[k]
+
+
+@njit(cache=True)
+def _compute_phase_stats(
+    samples: np.ndarray, scratch: np.ndarray, n: int
+) -> tuple[float, float, float]:
+    """Compute phase stats: mean, max, p99. Uses pre-allocated scratch buffer."""
+    if n == 0:
+        return 0.0, 0.0, 0.0
+
+    # Compute mean and max in single pass
+    total = 0.0
+    max_val = samples[0]
+    for i in range(n):
+        total += samples[i]
+        if samples[i] > max_val:
+            max_val = samples[i]
+    mean = total / n
+
+    # p99 via quickselect (copy to scratch first to preserve original)
+    if n >= 20:
+        for i in range(n):
+            scratch[i] = samples[i]
+        k = int(n * 0.99)
+        p99 = _quickselect(scratch[:n], k)
+    else:
+        p99 = max_val
+
+    return mean, max_val, p99
+
+
+@njit(cache=True)
+def _compute_loop_stats(
+    samples: np.ndarray, scratch: np.ndarray, n: int
+) -> tuple[float, float, float, float, float, float]:
+    """Compute loop stats using single-pass Welford's algorithm for mean+std.
+
+    Uses pre-allocated scratch buffer for percentile computation.
+    Only one copy to scratch (p99 first, then p95 on same data).
+    """
+    if n == 0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # Single-pass Welford's algorithm for mean and variance + min/max
+    mean = 0.0
+    m2 = 0.0  # Sum of squared differences
+    min_val = samples[0]
+    max_val = samples[0]
+
+    for i in range(n):
+        x = samples[i]
+        # Welford's online algorithm
+        delta = x - mean
+        mean += delta / (i + 1)
+        delta2 = x - mean
+        m2 += delta * delta2
+        # Track min/max
+        if x < min_val:
+            min_val = x
+        if x > max_val:
+            max_val = x
+
+    std = np.sqrt(m2 / n) if n > 0 else 0.0
+
+    # p95 and p99 via quickselect with single copy
+    if n >= 20:
+        # Copy to scratch once
+        for i in range(n):
+            scratch[i] = samples[i]
+
+        # Compute p99 first (higher index)
+        k99 = int(n * 0.99)
+        p99 = _quickselect(scratch[:n], k99)
+
+        # Compute p95 on same array (works because k95 < k99)
+        k95 = int(n * 0.95)
+        p95 = _quickselect(scratch[:n], k95)
+    else:
+        p95 = max_val
+        p99 = max_val
+
+    return mean, std, min_val, max_val, p95, p99
+
+
+# =============================================================================
+# PhaseMetrics - jitclass for phase timing
+# =============================================================================
+
+_phase_metrics_spec = [
+    ("_buffer", float64[:]),
+    ("_scratch", float64[:]),
+    ("_buffer_idx", int64),
+    ("_buffer_count", int64),
+    ("last_s", float64),
+    ("mean_s", float64),
+    ("max_s", float64),
+    ("p99_s", float64),
+]
+
+
+@jitclass(_phase_metrics_spec)
+class PhaseMetrics:
+    """Rolling statistics for a single phase (numba jitclass)."""
+
+    def __init__(self) -> None:
+        self._buffer = np.zeros(BUFFER_SIZE, dtype=np.float64)
+        self._scratch = np.zeros(BUFFER_SIZE, dtype=np.float64)
+        self._buffer_idx = 0
+        self._buffer_count = 0
+        self.last_s = 0.0
+        self.mean_s = 0.0
+        self.max_s = 0.0
+        self.p99_s = 0.0
+
+    def record(self, duration: float) -> None:
+        """Record a duration sample."""
+        self.last_s = duration
+        self._buffer[self._buffer_idx] = duration
+        self._buffer_idx = (self._buffer_idx + 1) & BUFFER_MASK
+        if self._buffer_count < BUFFER_SIZE:
+            self._buffer_count += 1
+
+    def compute_stats(self) -> None:
+        """Compute statistics from buffer."""
+        if self._buffer_count == 0:
+            return
+        mean, max_val, p99 = _compute_phase_stats(
+            self._buffer, self._scratch, self._buffer_count
+        )
+        self.mean_s = mean
+        self.max_s = max_val
+        self.p99_s = p99
+
+
+class PhaseTimer:
+    """Timer for measuring durations of multiple named phases in a loop.
+
+    Usage:
+        timer = PhaseTimer(["read", "execute", "write"])
+        while True:
+            with timer.phase("read"):
+                do_read()
+            with timer.phase("execute"):
+                do_execute()
+            timer.tick()  # Compute stats periodically
+    """
+
+    def __init__(self, phase_names: list[str], stats_interval: int = 50):
+        self._phases: dict[str, PhaseMetrics] = {
+            name: PhaseMetrics() for name in phase_names
+        }
+        self._stats_interval = stats_interval
+        self._tick_count = 0
+        self._current_phase: str | None = None
+        self._phase_start: float = 0.0
+
+    @property
+    def phases(self) -> dict[str, PhaseMetrics]:
+        """Access phase metrics by name."""
+        return self._phases
+
+    def start(self, phase: str) -> None:
+        """Start timing a phase."""
+        self._current_phase = phase
+        self._phase_start = time.perf_counter()
+
+    def stop(self) -> float:
+        """Stop timing current phase and record duration. Returns duration."""
+        if self._current_phase is None:
+            return 0.0
+        duration = time.perf_counter() - self._phase_start
+        self._phases[self._current_phase].record(duration)
+        self._current_phase = None
+        return duration
+
+    def phase(self, name: str) -> "PhaseContext":
+        """Context manager for timing a phase."""
+        return PhaseContext(self, name)
+
+    def tick(self) -> None:
+        """Call once per loop iteration to compute stats periodically."""
+        self._tick_count += 1
+        if self._tick_count % self._stats_interval == 0:
+            for p in self._phases.values():
+                p.compute_stats()
+
+    def get_summary(self) -> dict[str, dict[str, float]]:
+        """Get summary of all phases as dict."""
+        return {
+            name: {
+                "mean_ms": p.mean_s * 1000,
+                "max_ms": p.max_s * 1000,
+                "p99_ms": p.p99_s * 1000,
+            }
+            for name, p in self._phases.items()
+        }
+
+
+class PhaseContext:
+    """Context manager for timing a phase."""
+
+    __slots__ = ("_timer", "_phase")
+
+    def __init__(self, timer: PhaseTimer, phase: str):
+        self._timer = timer
+        self._phase = phase
+
+    def __enter__(self) -> "Self":
+        self._timer.start(self._phase)
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._timer.stop()
+
+
+# =============================================================================
+# LoopMetrics - jitclass for loop timing metrics
+# =============================================================================
+
+_loop_metrics_spec = [
+    # Counters
+    ("loop_count", int64),
+    ("overrun_count", int64),
+    # Rolling stats
+    ("mean_period_s", float64),
+    ("std_period_s", float64),
+    ("min_period_s", float64),
+    ("max_period_s", float64),
+    ("p95_period_s", float64),
+    ("p99_period_s", float64),
+    # Circular buffer
+    ("_buffer", float64[:]),
+    ("_scratch", float64[:]),
+    ("_buffer_idx", int64),
+    ("_buffer_count", int64),
+    # Timing control
+    ("_target_period_s", float64),
+    ("_prev_time", float64),
+    ("_last_log_time", float64),
+    ("_last_warn_time", float64),
+    ("_stats_interval", int64),
+    # Startup grace period
+    ("_start_time", float64),
+    ("_grace_period_s", float64),
+]
+
+
+@jitclass(_loop_metrics_spec)
 class LoopMetrics:
-    """Metrics tracked by the loop timer."""
+    """Metrics tracked by the loop timer with rolling statistics (numba jitclass).
 
-    loop_count: int = 0
-    overrun_count: int = 0
-    last_period_s: float = 0.0
-    ema_period_s: float = 0.0
+    Provides unified timing, logging, and degradation checking across subsystems.
+    Use configure() to set target period, then call tick() each iteration.
+    """
+
+    def __init__(self) -> None:
+        self.loop_count = 0
+        self.overrun_count = 0
+        self.mean_period_s = 0.0
+        self.std_period_s = 0.0
+        self.min_period_s = 0.0
+        self.max_period_s = 0.0
+        self.p95_period_s = 0.0
+        self.p99_period_s = 0.0
+        self._buffer = np.zeros(BUFFER_SIZE, dtype=np.float64)
+        self._scratch = np.zeros(BUFFER_SIZE, dtype=np.float64)
+        self._buffer_idx = 0
+        self._buffer_count = 0
+        self._target_period_s = 0.0
+        self._prev_time = 0.0
+        self._last_log_time = 0.0
+        self._last_warn_time = 0.0
+        self._stats_interval = 50
+        self._start_time = 0.0
+        self._grace_period_s = 10.0
+
+    def configure(
+        self, target_period_s: float, stats_interval: int, grace_period_s: float = 15.0
+    ) -> None:
+        """Configure target period, stats interval, and startup grace period.
+
+        Args:
+            target_period_s: Target loop period in seconds
+            stats_interval: How often to compute rolling statistics (in loop iterations)
+            grace_period_s: Duration after mark_started() during which overbudget
+                warnings are suppressed. Defaults to 15s to allow for JIT warmup
+                and process pool initialization.
+        """
+        self._target_period_s = target_period_s
+        self._stats_interval = stats_interval
+        self._grace_period_s = grace_period_s
+
+    def mark_started(self, now: float) -> None:
+        """Mark the start time for grace period calculation."""
+        self._start_time = now
+
+    def tick(self, now: float) -> None:
+        """Call once per iteration. Auto-records period and computes stats periodically."""
+        if self._prev_time > 0:
+            self.record_period(now - self._prev_time)
+        self._prev_time = now
+        self.loop_count += 1
+        if self.loop_count % self._stats_interval == 0:
+            self.compute_stats()
+
+    def should_log(self, now: float, interval: float) -> bool:
+        """Returns True and updates timestamp if interval has passed."""
+        if now - self._last_log_time >= interval:
+            self._last_log_time = now
+            return True
+        return False
+
+    def check_degraded(
+        self, now: float, threshold: float, rate_limit: float
+    ) -> tuple[bool, float]:
+        """Check if p99 exceeds target by threshold. Returns (should_warn, degradation_pct).
+
+        Rate-limited to once per rate_limit seconds. Suppressed during startup grace period.
+        """
+        if self._target_period_s <= 0 or self.p99_period_s <= 0:
+            return False, 0.0
+        # Suppress warnings during startup grace period
+        if self._start_time > 0 and (now - self._start_time) < self._grace_period_s:
+            return False, 0.0
+        if now - self._last_warn_time < rate_limit:
+            return False, 0.0
+        if self.p99_period_s > self._target_period_s * (1.0 + threshold):
+            degradation = (self.p99_period_s / self._target_period_s - 1.0) * 100.0
+            self._last_warn_time = now
+            return True, degradation
+        return False, 0.0
+
+    def record_period(self, period: float) -> None:
+        """Record a period sample into the circular buffer."""
+        self._buffer[self._buffer_idx] = period
+        self._buffer_idx = (self._buffer_idx + 1) & BUFFER_MASK
+        if self._buffer_count < BUFFER_SIZE:
+            self._buffer_count += 1
+
+    def compute_stats(self) -> None:
+        """Compute statistics from buffer."""
+        if self._buffer_count == 0:
+            return
+        mean, std, min_val, max_val, p95, p99 = _compute_loop_stats(
+            self._buffer, self._scratch, self._buffer_count
+        )
+        self.mean_period_s = mean
+        self.std_period_s = std
+        self.min_period_s = min_val
+        self.max_period_s = max_val
+        self.p95_period_s = p95
+        self.p99_period_s = p99
+
+    def reset_stats(self) -> None:
+        """Reset rolling statistics (keeps loop_count and overrun_count)."""
+        for i in range(BUFFER_SIZE):
+            self._buffer[i] = 0.0
+        self._buffer_idx = 0
+        self._buffer_count = 0
+        self.mean_period_s = 0.0
+        self.std_period_s = 0.0
+        self.min_period_s = 0.0
+        self.max_period_s = 0.0
+        self.p95_period_s = 0.0
+        self.p99_period_s = 0.0
+
+
+def format_hz_summary(m: LoopMetrics) -> str:
+    """Format metrics as 'XXX.XHz σ=X.XXms p99=X.XXms'."""
+    if m.mean_period_s <= 0:
+        return "0.0Hz σ=0.00ms p99=0.00ms"
+    hz = 1.0 / m.mean_period_s
+    return (
+        f"{hz:.1f}Hz σ={m.std_period_s * 1000:.2f}ms p99={m.p99_period_s * 1000:.2f}ms"
+    )
 
 
 class LoopTimer:
@@ -22,19 +437,31 @@ class LoopTimer:
     precise timing without OS scheduling jitter.
     """
 
-    def __init__(self, interval_s: float, busy_threshold_s: float = 0.001):
+    def __init__(
+        self,
+        interval_s: float,
+        busy_threshold_s: float | None = None,
+        stats_interval: int = 50,
+    ):
         """Initialize the loop timer.
 
         Args:
             interval_s: Target loop interval in seconds.
             busy_threshold_s: Time before deadline to switch from sleep to busy-loop.
-                             Default 1ms provides good precision without excessive CPU.
+                             Default from PAROL6_BUSY_THRESHOLD_MS env var (2ms).
+            stats_interval: Compute stats every N loops (default 50 = 5Hz at 250Hz loop).
         """
         self._interval = interval_s
-        self._busy_threshold = busy_threshold_s
+        self._busy_threshold = (
+            busy_threshold_s
+            if busy_threshold_s is not None
+            else cfg.BUSY_THRESHOLD_MS / 1000.0
+        )
+        self._stats_interval = stats_interval
         self._next_deadline = 0.0
         self._prev_t = 0.0
         self.metrics = LoopMetrics()
+        self.metrics.configure(interval_s, stats_interval)
 
     @property
     def interval(self) -> float:
@@ -50,21 +477,21 @@ class LoopTimer:
     def wait_for_next_tick(self) -> None:
         """Wait until next deadline using hybrid sleep + busy-loop.
 
-        Updates metrics (loop_count, period, EMA) and handles overruns.
+        Updates metrics (loop_count, period, stats) and handles overruns.
         Call at the end of each loop iteration.
         """
-        # Update metrics
+        # Measure period
         now = time.perf_counter()
         period = now - self._prev_t
         self._prev_t = now
         self.metrics.loop_count += 1
-        self.metrics.last_period_s = period
 
-        # EMA with alpha=0.1
-        if self.metrics.ema_period_s <= 0.0:
-            self.metrics.ema_period_s = period
-        else:
-            self.metrics.ema_period_s = 0.1 * period + 0.9 * self.metrics.ema_period_s
+        # Record to rolling buffer
+        self.metrics.record_period(period)
+
+        # Compute stats periodically (not every loop)
+        if self.metrics.loop_count % self._stats_interval == 0:
+            self.metrics.compute_stats()
 
         # Advance deadline
         self._next_deadline += self._interval

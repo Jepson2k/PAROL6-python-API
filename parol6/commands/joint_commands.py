@@ -212,14 +212,15 @@ class MovePoseCommand(JointMoveCommandBase):
     ) -> np.ndarray:
         """Solve IK for target pose and return joint positions in radians."""
         assert self.pose is not None
-        target_pose = se3_from_rpy(
+        target_pose = np.zeros((4, 4), dtype=np.float64)
+        se3_from_rpy(
             self.pose[0] / 1000.0,
             self.pose[1] / 1000.0,
             self.pose[2] / 1000.0,
-            self.pose[3],
-            self.pose[4],
-            self.pose[5],
-            degrees=True,
+            np.radians(self.pose[3]),
+            np.radians(self.pose[4]),
+            np.radians(self.pose[5]),
+            target_pose,
         )
 
         ik_solution = solve_ik(PAROL6_ROBOT.robot, target_pose, current_rad)

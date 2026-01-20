@@ -1,12 +1,13 @@
 """
 Type definitions for PAROL6 protocol.
 
-Defines enums, TypedDicts, and dataclasses used across the public API.
+Defines enums and dataclasses used across the public API.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Literal, TypedDict
+from typing import Literal
 
 
 # Stream mode state enum
@@ -39,7 +40,8 @@ AckStatus = Literal[
 ]
 
 
-class IOStatus(TypedDict):
+@dataclass(slots=True, frozen=True)
+class IOStatus:
     """Digital I/O status."""
 
     in1: int
@@ -49,7 +51,8 @@ class IOStatus(TypedDict):
     estop: int
 
 
-class GripperStatus(TypedDict):
+@dataclass(slots=True, frozen=True)
+class GripperStatus:
     """Electric gripper status."""
 
     id: int
@@ -60,19 +63,8 @@ class GripperStatus(TypedDict):
     object_detect: int
 
 
-class StatusAggregate(TypedDict, total=False):
-    """Aggregate robot status."""
-
-    pose: list[float]  # 4x4 transformation matrix flattened (len=16)
-    angles: list[float]  # 6 joint angles in degrees
-    io: IOStatus | list[int]  # Back-compat with existing server format
-    gripper: GripperStatus | list[int]
-    action_current: str  # Current executing action/command name
-    action_state: str  # Current action state (IDLE, EXECUTING, etc)
-    action_next: str  # Next non-streamable action in queue
-
-
-class TrackingStatus(TypedDict):
+@dataclass(slots=True)
+class TrackingStatus:
     """Command tracking status."""
 
     command_id: str | None
@@ -82,7 +74,8 @@ class TrackingStatus(TypedDict):
     ack_time: datetime | None
 
 
-class SendResult(TypedDict):
+@dataclass(slots=True)
+class SendResult:
     """Standardized result for command-sending APIs."""
 
     command_id: str | None
@@ -92,25 +85,9 @@ class SendResult(TypedDict):
     ack_time: datetime | None
 
 
-class PingResult(TypedDict):
+@dataclass(slots=True, frozen=True)
+class PingResult:
     """Parsed PING response."""
 
     serial_connected: bool
-    raw: str  # Original response for debugging
-
-
-class WireResponse(TypedDict):
-    """Typed wrapper for parsed wire responses."""
-
-    type: Literal[
-        "PONG",
-        "POSE",
-        "ANGLES",
-        "IO",
-        "GRIPPER",
-        "SPEEDS",
-        "STATUS",
-        "GCODE_STATUS",
-        "SERVER_STATE",
-    ]
-    payload: dict | list | str
+    raw: str

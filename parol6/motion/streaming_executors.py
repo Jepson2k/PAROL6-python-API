@@ -14,23 +14,77 @@ import threading
 from abc import ABC, abstractmethod
 
 import numpy as np
-import sophuspy as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import LIMITS
+from parol6.utils.se3_utils import (
+    se3_exp_ws,
+    se3_inverse,
+    se3_log_ws,
+    se3_mul,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @njit(cache=True)
-def _transform_vel_wrf_to_body(
-    R_T: np.ndarray, world_vel: np.ndarray, body_vel: np.ndarray
+def _pose_to_tangent_jit(
+    ref_pose: np.ndarray,
+    pose: np.ndarray,
+    ref_inv: np.ndarray,
+    delta: np.ndarray,
+    out: np.ndarray,
+    omega_ws: np.ndarray,
+    R_ws: np.ndarray,
+    V_inv_ws: np.ndarray,
 ) -> None:
-    np.dot(R_T, world_vel[:3], body_vel[:3])
-    np.dot(R_T, world_vel[3:], body_vel[3:])
+    """Convert SE3 pose to 6D tangent vector relative to reference.
+
+    Uses workspace variants for zero internal allocation.
+
+    Args:
+        ref_pose: Reference pose (4x4 SE3)
+        pose: Pose to convert (4x4 SE3)
+        ref_inv: Workspace buffer for reference inverse (4x4)
+        delta: Workspace buffer for delta transform (4x4)
+        out: Output tangent vector (6,) [vx, vy, vz, wx, wy, wz]
+        omega_ws: Workspace buffer for axis-angle (3,)
+        R_ws: Workspace buffer for rotation matrix (3,3)
+        V_inv_ws: Workspace buffer for V inverse matrix (3,3)
+    """
+    se3_inverse(ref_pose, ref_inv)
+    se3_mul(ref_inv, pose, delta)
+    se3_log_ws(delta, out, omega_ws, R_ws, V_inv_ws)
+
+
+@njit(cache=True)
+def _tangent_to_pose_jit(
+    ref_pose: np.ndarray,
+    tangent: np.ndarray,
+    delta: np.ndarray,
+    out: np.ndarray,
+    omega_ws: np.ndarray,
+    R_ws: np.ndarray,
+    V_ws: np.ndarray,
+) -> None:
+    """Convert 6D tangent vector back to SE3 pose.
+
+    Uses workspace variants for zero internal allocation.
+
+    Args:
+        ref_pose: Reference pose (4x4 SE3)
+        tangent: Tangent vector (6,) [vx, vy, vz, wx, wy, wz]
+        delta: Workspace buffer for delta transform (4x4)
+        out: Output pose (4x4 SE3)
+        omega_ws: Workspace buffer for axis-angle (3,)
+        R_ws: Workspace buffer for rotation matrix (3,3)
+        V_ws: Workspace buffer for V matrix (3,3)
+    """
+    se3_exp_ws(tangent, delta, omega_ws, R_ws, V_ws)
+    se3_mul(ref_pose, delta, out)
 
 
 # Module-level constant for error checking (avoids tuple creation per check)
@@ -371,18 +425,6 @@ class StreamingExecutor(RuckigExecutorBase):
             self._init_state()
 
     @property
-    def current_position(self) -> list[float]:
-        """Get current position state in radians."""
-        with self._lock:
-            return list(self.inp.current_position)
-
-    @property
-    def current_velocity(self) -> list[float]:
-        """Get current velocity state in rad/s."""
-        with self._lock:
-            return list(self.inp.current_velocity)
-
-    @property
     def cart_vel_limit(self) -> float | None:
         """Get current Cartesian velocity limit in mm/s, or None if disabled."""
         return self._cart_vel_limit
@@ -420,7 +462,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         """
         # Reference pose for tangent space computations
         # Must be set before super().__init__ calls _init_limits/_init_state
-        self.reference_pose: sp.SE3 | None = None
+        self.reference_pose: np.ndarray | None = None
 
         # Pre-allocated arrays for Ruckig parameters (reused to avoid per-tick allocations)
         # Ruckig copies values on assignment, so we update in-place then assign same array
@@ -437,6 +479,15 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._tangent_buf = np.zeros(6, dtype=np.float64)
         self._vel_np_buf = np.zeros(6, dtype=np.float64)
         self._world_vel_buf = np.zeros(6, dtype=np.float64)
+
+        # SE3 workspace buffers for JIT functions (avoids allocations in pose conversions)
+        self._ref_inv_buf = np.zeros((4, 4), dtype=np.float64)
+        self._delta_buf = np.zeros((4, 4), dtype=np.float64)
+        self._result_pose_buf = np.zeros((4, 4), dtype=np.float64)
+        # Additional workspace for se3_log_ws/se3_exp_ws (zero internal allocation)
+        self._omega_ws = np.zeros(3, dtype=np.float64)
+        self._R_ws = np.zeros((3, 3), dtype=np.float64)
+        self._V_ws = np.zeros((3, 3), dtype=np.float64)  # Reused for V and V_inv
 
     def _init_limits(self) -> None:
         """Initialize Cartesian velocity/acceleration/jerk limits from centralized config."""
@@ -479,7 +530,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         self._max_jerk_arr[3:] = self._j_ang_max
         self.inp.max_jerk = self._max_jerk_arr
 
-    def sync_pose(self, current_pose: sp.SE3) -> None:
+    def sync_pose(self, current_pose: np.ndarray) -> None:
         """
         Sync current pose from robot feedback.
 
@@ -487,7 +538,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         Sets the reference pose for tangent space computations.
 
         Args:
-            current_pose: Current TCP pose as SE3
+            current_pose: Current TCP pose as 4x4 SE3 matrix
         """
         with self._lock:
             self.reference_pose = (
@@ -500,7 +551,7 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             self.inp.target_position = [0.0] * 6
             self.active = False
 
-    def _pose_to_tangent(self, pose: sp.SE3) -> list[float]:
+    def _pose_to_tangent(self, pose: np.ndarray) -> list[float]:
         """
         Convert SE3 pose to 6D tangent vector relative to reference.
 
@@ -508,18 +559,27 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
         [vx, vy, vz, wx, wy, wz] where v is linear and w is angular.
 
         Args:
-            pose: SE3 pose to convert
+            pose: 4x4 SE3 matrix to convert
 
         Returns:
             6D tangent vector [x, y, z, wx, wy, wz]
         """
         if self.reference_pose is None:
             return [0.0] * 6
-        delta = self.reference_pose.inverse() * pose
-        log_vec = delta.log()  # Returns 6D twist vector
-        return list(log_vec)
+        # Use JIT function with pre-allocated workspace buffers (zero allocation)
+        _pose_to_tangent_jit(
+            self.reference_pose,
+            pose,
+            self._ref_inv_buf,
+            self._delta_buf,
+            self._tangent_buf,
+            self._omega_ws,
+            self._R_ws,
+            self._V_ws,
+        )
+        return list(self._tangent_buf)
 
-    def _tangent_to_pose(self, tangent: list[float]) -> sp.SE3:
+    def _tangent_to_pose(self, tangent: list[float]) -> np.ndarray:
         """
         Convert 6D tangent vector back to SE3 pose.
 
@@ -527,16 +587,24 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             tangent: 6D tangent vector [x, y, z, wx, wy, wz]
 
         Returns:
-            SE3 pose
+            4x4 SE3 matrix
         """
         if self.reference_pose is None:
-            return sp.SE3()
-        # Reuse pre-allocated buffer for numpy conversion
+            return np.eye(4, dtype=np.float64)
+        # Copy tangent to buffer and use JIT function with pre-allocated workspace
         self._tangent_buf[:] = tangent
-        delta = sp.SE3.exp(self._tangent_buf)
-        return self.reference_pose * delta
+        _tangent_to_pose_jit(
+            self.reference_pose,
+            self._tangent_buf,
+            self._delta_buf,
+            self._result_pose_buf,
+            self._omega_ws,
+            self._R_ws,
+            self._V_ws,
+        )
+        return self._result_pose_buf
 
-    def set_pose_target(self, target_pose: sp.SE3) -> None:
+    def set_pose_target(self, target_pose: np.ndarray) -> None:
         """
         Set target pose for position mode (MOVECART).
 
@@ -622,12 +690,11 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
 
             # Transform from world frame to body frame (tangent space)
             # Body velocity = R^T @ world velocity
-            R = self.reference_pose.rotationMatrix()
+            R = self.reference_pose[:3, :3]
 
             # JIT-compiled transform into target buffer (zero allocation)
-            _transform_vel_wrf_to_body(
-                R.T, self._world_vel_buf, self._target_velocity_arr
-            )
+            np.dot(R.T, self._world_vel_buf[:3], self._target_velocity_arr[:3])
+            np.dot(R.T, self._world_vel_buf[3:], self._target_velocity_arr[3:])
 
             self.inp.control_interface = ControlInterface.Velocity
             self.inp.target_velocity = self._target_velocity_arr
@@ -637,29 +704,42 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             self._apply_limits()
             self.active = True
 
-    def tick(self) -> tuple[sp.SE3, NDArray[np.float64], bool]:
+    def tick(self) -> tuple[np.ndarray, NDArray[np.float64], bool]:
         """
         Execute one control cycle.
 
-        Warning: Returned velocity array is reused across calls. Copy if needed.
+        Warning: Returned pose and velocity arrays are reused across calls.
+        Copy if needed across ticks.
 
         Returns:
             Tuple of (smoothed_pose, velocity, finished):
-            - smoothed_pose: The smoothed Cartesian pose for this tick
-            - velocity: Current 6D velocity [vx, vy, vz, wx, wy, wz]
+            - smoothed_pose: The smoothed Cartesian pose for this tick (buffer, reused)
+            - velocity: Current 6D velocity [vx, vy, vz, wx, wy, wz] (buffer, reused)
             - finished: True if target reached (position mode) or
                        target velocity reached (velocity mode)
         """
         with self._lock:
             if not self.active or self.reference_pose is None:
                 self._vel_np_buf.fill(0.0)
-                return self.reference_pose or sp.SE3(), self._vel_np_buf, True
+                return (
+                    self.reference_pose
+                    if self.reference_pose is not None
+                    else np.eye(4, dtype=np.float64),
+                    self._vel_np_buf,
+                    True,
+                )
 
             result, pos, vel = self._tick_ruckig()
 
             if result in _RUCKIG_ERRORS:
                 self._vel_np_buf.fill(0.0)
-                return self.reference_pose or sp.SE3(), self._vel_np_buf, True
+                return (
+                    self.reference_pose
+                    if self.reference_pose is not None
+                    else np.eye(4, dtype=np.float64),
+                    self._vel_np_buf,
+                    True,
+                )
 
             # Convert tangent back to pose
             smoothed_pose = self._tangent_to_pose(pos)
@@ -677,17 +757,3 @@ class CartesianStreamingExecutor(RuckigExecutorBase):
             self.reference_pose = None
             self.active = False
             self._init_state()
-
-    @property
-    def current_pose(self) -> sp.SE3 | None:
-        """Get current pose state."""
-        with self._lock:
-            if self.reference_pose is None:
-                return None
-            return self._tangent_to_pose(list(self.inp.current_position))
-
-    @property
-    def current_velocity(self) -> NDArray[np.float64]:
-        """Get current velocity state [vx, vy, vz, wx, wy, wz]."""
-        with self._lock:
-            return np.array(self.inp.current_velocity)

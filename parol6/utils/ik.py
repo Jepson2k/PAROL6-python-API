@@ -8,7 +8,6 @@ import time
 from collections.abc import Sequence
 
 import numpy as np
-import sophuspy as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
 from roboticstoolbox import DHRobot
@@ -146,7 +145,7 @@ class SolveIKResultBuffer(IKResultBuffer):
 
 def solve_ik(
     robot: DHRobot,
-    target_pose: sp.SE3,
+    target_pose: NDArray[np.float64],
     current_q: Sequence[float] | NDArray[np.float64],
     quiet_logging: bool = False,
 ) -> SolveIKResultBuffer:
@@ -161,8 +160,8 @@ def solve_ik(
     ----------
     robot : DHRobot
         Robot model
-    target_pose : sp.SE3
-        Target pose to reach (sophuspy SE3)
+    target_pose : NDArray[np.float64]
+        Target pose as 4x4 SE3 transformation matrix
     current_q : array_like
         Current joint configuration in radians
     quiet_logging : bool, optional
@@ -182,8 +181,8 @@ def solve_ik(
     # Get cached robot data (qlim, ets, buffered limits, result buffer)
     qlim, ets, buffered_min, buffered_max, result = _get_cached_ik_data(robot)
 
-    # ik_LM accepts numpy 4x4 matrices - extract from sophuspy SE3
-    target_matrix = target_pose.matrix()
+    # ik_LM accepts numpy 4x4 matrices
+    target_matrix = np.asarray(target_pose, dtype=np.float64)
 
     ets.ik_LM(
         target_matrix,
