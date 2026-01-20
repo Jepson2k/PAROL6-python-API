@@ -14,5 +14,6 @@ def clean_state(server_proc, client):
     """
     client.reset()
     client.set_profile("LINEAR")
-    client.home(wait=True)
+    # Use short timeouts - simulator homing is instant
+    client.home(wait=True, motion_start_timeout=0.2, settle_window=0.1)
     return client
