@@ -4,8 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 import numpy as np
-from numba import njit, int64, float64  # type: ignore[import-untyped]
-from numba.experimental import jitclass  # type: ignore[import-untyped]
+from numba import njit  # type: ignore[import-untyped]
 
 from parol6 import config as cfg
 
@@ -21,7 +20,7 @@ BUFFER_MASK = BUFFER_SIZE - 1  # 1023 for & operation
 
 
 # =============================================================================
-# Numba-accelerated statistics functions
+# Numba-accelerated statistics functions (cached to disk)
 # =============================================================================
 
 
@@ -137,24 +136,27 @@ def _compute_loop_stats(
 
 
 # =============================================================================
-# PhaseMetrics - jitclass for phase timing
+# PhaseMetrics - regular Python class (no jitclass overhead)
 # =============================================================================
 
-_phase_metrics_spec = [
-    ("_buffer", float64[:]),
-    ("_scratch", float64[:]),
-    ("_buffer_idx", int64),
-    ("_buffer_count", int64),
-    ("last_s", float64),
-    ("mean_s", float64),
-    ("max_s", float64),
-    ("p99_s", float64),
-]
 
-
-@jitclass(_phase_metrics_spec)
 class PhaseMetrics:
-    """Rolling statistics for a single phase (numba jitclass)."""
+    """Rolling statistics for a single phase.
+
+    Uses pre-allocated numpy arrays and calls @njit helper functions
+    for the heavy computation.
+    """
+
+    __slots__ = (
+        "_buffer",
+        "_scratch",
+        "_buffer_idx",
+        "_buffer_count",
+        "last_s",
+        "mean_s",
+        "max_s",
+        "p99_s",
+    )
 
     def __init__(self) -> None:
         self._buffer = np.zeros(BUFFER_SIZE, dtype=np.float64)
@@ -268,44 +270,41 @@ class PhaseContext:
 
 
 # =============================================================================
-# LoopMetrics - jitclass for loop timing metrics
+# LoopMetrics
 # =============================================================================
 
-_loop_metrics_spec = [
-    # Counters
-    ("loop_count", int64),
-    ("overrun_count", int64),
-    # Rolling stats
-    ("mean_period_s", float64),
-    ("std_period_s", float64),
-    ("min_period_s", float64),
-    ("max_period_s", float64),
-    ("p95_period_s", float64),
-    ("p99_period_s", float64),
-    # Circular buffer
-    ("_buffer", float64[:]),
-    ("_scratch", float64[:]),
-    ("_buffer_idx", int64),
-    ("_buffer_count", int64),
-    # Timing control
-    ("_target_period_s", float64),
-    ("_prev_time", float64),
-    ("_last_log_time", float64),
-    ("_last_warn_time", float64),
-    ("_stats_interval", int64),
-    # Startup grace period
-    ("_start_time", float64),
-    ("_grace_period_s", float64),
-]
 
-
-@jitclass(_loop_metrics_spec)
 class LoopMetrics:
-    """Metrics tracked by the loop timer with rolling statistics (numba jitclass).
+    """Metrics tracked by the loop timer with rolling statistics.
 
     Provides unified timing, logging, and degradation checking across subsystems.
     Use configure() to set target period, then call tick() each iteration.
+
+    Uses pre-allocated numpy arrays and calls @njit helper functions
+    for the heavy computation.
     """
+
+    __slots__ = (
+        "loop_count",
+        "overrun_count",
+        "mean_period_s",
+        "std_period_s",
+        "min_period_s",
+        "max_period_s",
+        "p95_period_s",
+        "p99_period_s",
+        "_buffer",
+        "_scratch",
+        "_buffer_idx",
+        "_buffer_count",
+        "_target_period_s",
+        "_prev_time",
+        "_last_log_time",
+        "_last_warn_time",
+        "_stats_interval",
+        "_start_time",
+        "_grace_period_s",
+    )
 
     def __init__(self) -> None:
         self.loop_count = 0
@@ -407,8 +406,7 @@ class LoopMetrics:
 
     def reset_stats(self) -> None:
         """Reset rolling statistics (keeps loop_count and overrun_count)."""
-        for i in range(BUFFER_SIZE):
-            self._buffer[i] = 0.0
+        self._buffer.fill(0.0)
         self._buffer_idx = 0
         self._buffer_count = 0
         self.mean_period_s = 0.0
