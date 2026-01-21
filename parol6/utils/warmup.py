@@ -266,7 +266,6 @@ def warmup_jit() -> float:
         dummy_8u8,  # homed_in
         dummy_8u8,  # io_in
         dummy_6f.copy(),  # prev_pos_f
-        dummy_6f.copy(),  # scratch_f
         dummy_6f.copy(),  # vmax_f
         dummy_6f.copy(),  # jmin_f
         dummy_6f.copy(),  # jmax_f
@@ -274,11 +273,6 @@ def warmup_jit() -> float:
         0,  # command_out
         0.004,  # dt
         0,  # homing_countdown
-        0.004,  # frame_interval
-        1,  # cmd_home
-        2,  # cmd_jog
-        3,  # cmd_move
-        0,  # cmd_idle
     )
     _write_frame_jit(
         dummy_6i,  # state_position_out
