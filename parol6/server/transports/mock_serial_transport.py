@@ -38,7 +38,6 @@ def _simulate_motion_jit(
     homed_in: np.ndarray,
     io_in: np.ndarray,
     prev_pos_f: np.ndarray,
-    scratch_f: np.ndarray,
     vmax_f: np.ndarray,
     jmin_f: np.ndarray,
     jmax_f: np.ndarray,
@@ -46,13 +45,12 @@ def _simulate_motion_jit(
     command_out: int,
     dt: float,
     homing_countdown: int,
-    frame_interval: float,
-    cmd_home: int,
-    cmd_jog: int,
-    cmd_move: int,
-    cmd_idle: int,
 ) -> tuple[int, int]:
-    """JIT-compiled motion simulation. Returns (new_homing_countdown, new_command_out)."""
+    """JIT-compiled motion simulation. Returns (new_homing_countdown, new_command_out).
+
+    Note: CommandCode enums are used directly inside the function (resolved at compile time).
+    Passing enums as arguments would add ~90µs overhead per call.
+    """
     # Handle homing countdown
     if homing_countdown > 0:
         homing_countdown -= 1
@@ -64,36 +62,53 @@ def _simulate_motion_jit(
                 position_in[i] = steps
                 position_f[i] = float(steps)
                 speed_in[i] = 0
-            command_out = cmd_idle
+            command_out = CommandCode.IDLE
 
     # Ensure E-stop stays released
     io_in[4] = 1
 
     # Simulate motion based on command type
-    if command_out == cmd_home:
+    if command_out == CommandCode.HOME:
         if homing_countdown == 0:
             for i in range(6):
                 homed_in[i] = 0
-            homing_countdown = max(1, int(0.2 / frame_interval + 0.5))
+            homing_countdown = max(1, int(0.2 / cfg.INTERVAL_S + 0.5))
         for i in range(6):
             speed_in[i] = 0
 
-    elif command_out == cmd_jog or command_out == 123:
+    elif command_out == CommandCode.JOG or command_out == 123:
         prev_pos_f[:] = position_f
 
-        v_cmd = np.clip(speed_out.astype(np.float64), -vmax_f, vmax_f)
-        new_pos_f = position_f + v_cmd * dt
-        np.clip(new_pos_f, jmin_f, jmax_f, position_f)
+        # Scalar loop avoids allocations from np.clip().astype() and array arithmetic
+        for i in range(6):
+            v = float(speed_out[i])
+            vmax = vmax_f[i]
+            if v > vmax:
+                v = vmax
+            elif v < -vmax:
+                v = -vmax
+
+            new_pos = position_f[i] + v * dt
+            if new_pos < jmin_f[i]:
+                new_pos = jmin_f[i]
+            elif new_pos > jmax_f[i]:
+                new_pos = jmax_f[i]
+            position_f[i] = new_pos
 
         if dt > 0:
-            np.rint((position_f - prev_pos_f) / dt, scratch_f)
-            np.clip(scratch_f, -vmax_f, vmax_f, scratch_f)
+            inv_dt = 1.0 / dt
             for i in range(6):
-                speed_in[i] = int(scratch_f[i])
+                v = round((position_f[i] - prev_pos_f[i]) * inv_dt)
+                vmax = vmax_f[i]
+                if v > vmax:
+                    v = vmax
+                elif v < -vmax:
+                    v = -vmax
+                speed_in[i] = int(v)
         else:
             speed_in.fill(0)
 
-    elif command_out == cmd_move or command_out == 156:
+    elif command_out == CommandCode.MOVE or command_out == 156:
         prev_pos_f[:] = position_f
 
         for i in range(6):
@@ -119,10 +134,15 @@ def _simulate_motion_jit(
             position_f[i] = pos_f
 
         if dt > 0:
-            np.rint((position_f - prev_pos_f) / dt, scratch_f)
-            np.clip(scratch_f, -vmax_f, vmax_f, scratch_f)
+            inv_dt = 1.0 / dt
             for i in range(6):
-                speed_in[i] = int(scratch_f[i])
+                v = round((position_f[i] - prev_pos_f[i]) * inv_dt)
+                vmax = vmax_f[i]
+                if v > vmax:
+                    v = vmax
+                elif v < -vmax:
+                    v = -vmax
+                speed_in[i] = int(v)
         else:
             speed_in.fill(0)
 
@@ -131,9 +151,8 @@ def _simulate_motion_jit(
             speed_in[i] = 0
 
     # Sync integer position from float accumulator
-    np.rint(position_f, scratch_f)
     for i in range(6):
-        position_in[i] = int(scratch_f[i])
+        position_in[i] = int(round(position_f[i]))
 
     return homing_countdown, command_out
 
@@ -356,16 +375,8 @@ class MockSerialTransport:
         self._jmax_f = lims[:, 1].astype(np.float64, copy=False)
         self._home_angles_deg = np.array(cfg.HOME_ANGLES_DEG, dtype=np.float64)
 
-        # Scratch buffers for motion simulation (avoid per-tick allocations)
+        # Scratch buffer for motion simulation (stores previous position)
         self._prev_pos_f = np.zeros((6,), dtype=np.float64)
-        self._scratch_f = np.zeros((6,), dtype=np.float64)
-
-        # Precompute CommandCode values as int to avoid enum overhead in JIT calls
-        # Passing IntEnum to njit functions adds ~90µs overhead per call
-        self._cmd_home = int(CommandCode.HOME)
-        self._cmd_jog = int(CommandCode.JOG)
-        self._cmd_move = int(CommandCode.MOVE)
-        self._cmd_idle = int(CommandCode.IDLE)
 
         self._state.last_update = time.perf_counter()
 
@@ -488,8 +499,8 @@ class MockSerialTransport:
 
         if dt > 0:
             state = self._state
-            # Use precomputed int values instead of CommandCode enums to avoid
-            # ~90µs overhead from Numba handling IntEnum types
+            # CommandCode enums are resolved at compile time inside the JIT function.
+            # Passing enums as arguments would add ~90µs overhead per call.
             state.homing_countdown, state.command_out = _simulate_motion_jit(
                 state.position_f,
                 state.position_in,
@@ -499,7 +510,6 @@ class MockSerialTransport:
                 state.homed_in,
                 state.io_in,
                 self._prev_pos_f,
-                self._scratch_f,
                 self._vmax_f,
                 self._jmin_f,
                 self._jmax_f,
@@ -507,11 +517,6 @@ class MockSerialTransport:
                 int(state.command_out),
                 dt,
                 state.homing_countdown,
-                self._frame_interval,
-                self._cmd_home,
-                self._cmd_jog,
-                self._cmd_move,
-                self._cmd_idle,
             )
 
         self._encode_payload_into(self._frame_mv)
