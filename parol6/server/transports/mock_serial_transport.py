@@ -360,6 +360,13 @@ class MockSerialTransport:
         self._prev_pos_f = np.zeros((6,), dtype=np.float64)
         self._scratch_f = np.zeros((6,), dtype=np.float64)
 
+        # Precompute CommandCode values as int to avoid enum overhead in JIT calls
+        # Passing IntEnum to njit functions adds ~90µs overhead per call
+        self._cmd_home = int(CommandCode.HOME)
+        self._cmd_jog = int(CommandCode.JOG)
+        self._cmd_move = int(CommandCode.MOVE)
+        self._cmd_idle = int(CommandCode.IDLE)
+
         self._state.last_update = time.perf_counter()
 
         # Write initial frame so first read returns valid data
@@ -481,6 +488,8 @@ class MockSerialTransport:
 
         if dt > 0:
             state = self._state
+            # Use precomputed int values instead of CommandCode enums to avoid
+            # ~90µs overhead from Numba handling IntEnum types
             state.homing_countdown, state.command_out = _simulate_motion_jit(
                 state.position_f,
                 state.position_in,
@@ -495,14 +504,14 @@ class MockSerialTransport:
                 self._jmin_f,
                 self._jmax_f,
                 self._home_angles_deg,
-                state.command_out,
+                int(state.command_out),
                 dt,
                 state.homing_countdown,
                 self._frame_interval,
-                CommandCode.HOME,
-                CommandCode.JOG,
-                CommandCode.MOVE,
-                CommandCode.IDLE,
+                self._cmd_home,
+                self._cmd_jog,
+                self._cmd_move,
+                self._cmd_idle,
             )
 
         self._encode_payload_into(self._frame_mv)
