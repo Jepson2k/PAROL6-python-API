@@ -275,12 +275,7 @@ class AsyncRobotClient:
         while not self._closed:
             async with self._status_condition:
                 while self._status_generation == last_gen and not self._closed:
-                    try:
-                        await asyncio.wait_for(
-                            self._status_condition.wait(), timeout=2.0
-                        )
-                    except asyncio.TimeoutError:
-                        continue
+                    await self._status_condition.wait()
                 if self._closed:
                     break
                 last_gen = self._status_generation
