@@ -35,7 +35,7 @@ TRACE_ENABLED = str(os.getenv("PAROL_TRACE", "0")).lower() in ("1", "true", "yes
 logger = logging.getLogger(__name__)
 
 # Default control/sample rates (Hz)
-CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "200"))
+CONTROL_RATE_HZ: float = float(os.getenv("PAROL6_CONTROL_RATE_HZ", "100"))
 
 DEFAULT_ACCEL_PERCENT: float = 100.0
 

@@ -21,7 +21,7 @@ PAROL6 Python API is a lightweight client and controller for PAROL6 6-DOF robot 
 ┌──────────────────▼──────────────────────┐
 │              Controller                 │
 │  (parol6/server/controller.py)          │
-│  - 250 Hz control loop (configurable)   │
+│  - 100 Hz control loop (configurable)   │
 │  - Command queue & execution            │
 │  - Status multicast broadcasting        │
 └──────────────────┬──────────────────────┘
@@ -87,8 +87,8 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PAROL6_CONTROL_RATE_HZ` | 250 | Control loop frequency |
-| `PAROL6_STATUS_RATE_HZ` | 50 | Status broadcast rate |
+| `PAROL6_CONTROL_RATE_HZ` | 100 | Control loop frequency |
+| `PAROL6_STATUS_RATE_HZ` | 50 | Status broadcast rate (tests use 20 Hz) |
 | `PAROL6_FAKE_SERIAL` | 0 | Enable simulator (no hardware) |
 | `PAROL6_COM_PORT` | auto | Serial port override |
 | `PAROL_TRACE` | 0 | Enable TRACE logging |

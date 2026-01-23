@@ -81,14 +81,38 @@ Adding a command (overview):
 - *If necessary* Add client method to `async_client.py` and `sync_client.py`.
 
 ## Control rate and performance
-- Default control loop: `PAROL6_CONTROL_RATE_HZ=250` (chosen for consistent cross-platform behavior)
-- Higher control rates require stronger hardware and generally produce smoother motion, but there are diminishing returns—the motion will not become infinitely smooth just by increasing the rate
-- If the controller is falling behind you will see warnings like:
 
-  `Control loop avg period degraded by +XX% (avg=Ys target=Zs); latest overrun=Ws`
+The default control loop rate is **100 Hz** (`PAROL6_CONTROL_RATE_HZ=100`). Higher rates up to 250 Hz and even 500 Hz are achievable, but there are diminishing returns in motion smoothness as you go higher.
 
-  If you see this, or motion feels inconsistent, reduce `PAROL6_CONTROL_RATE_HZ`
-- TRACE logging impacts performance; enable only when necessary (set `PAROL_TRACE=1` or use `--log-level=TRACE`)
+### Performance characteristics
+
+The library has been optimized for real-time performance:
+- **Numba JIT compilation** for hot conversion functions (steps↔radians, degrees)
+- **NumPy vectorization** with pre-allocated buffers to minimize allocations
+- **C++ robotics-toolbox backend** for kinematics computations
+- **Very few hot-loop allocations** - most buffers are reused
+
+Even under complete IK failure (worst-case computation), the control loop typically completes in **under 2ms**. However, consistent high-rate performance requires consideration of OS scheduling—the operating system commonly interrupts user-space processes, which can cause jitter at higher rates.
+
+**Note:** Rates above 250 Hz may require increasing IK solving tolerance, as the distance moved per tick becomes smaller and numerical precision becomes a factor.
+
+### Tuning for higher rates
+
+For consistent high-rate performance:
+1. **Elevate process priority**: On Linux, use `nice -n -20` or `chrt -f 50` for real-time scheduling
+2. **Disable logging**: TRACE and DEBUG logging add significant overhead
+3. **Reduce background load**: Heavy background tasks compete for CPU time
+4. **Consider CPU isolation**: Pin the controller to dedicated cores with `taskset`
+
+### Monitoring performance
+
+If the controller is falling behind you will see warnings like:
+
+```
+Control loop avg period degraded by +XX% (avg=Ys target=Zs); latest overrun=Ws
+```
+
+If you see this consistently, or motion feels jittery, reduce `PAROL6_CONTROL_RATE_HZ` or address scheduling issues.
 
 ## Streaming mode
 - Streaming (`STREAM|ON` / `STREAM|OFF`; `client.stream_on()` / `client.stream_off()`) is intended for high-rate jogging and continuous updates
@@ -122,7 +146,7 @@ flowchart TB
             QUEUE["Command Queue<br/>(max 100)"]
         end
 
-        subgraph MainLoop["Main Control Loop (250 Hz)"]
+        subgraph MainLoop["Main Control Loop (100 Hz)"]
             direction TB
             RX_SERIAL["1. Read Serial Frame"]
             ESTOP["2. E-Stop Check"]
@@ -145,7 +169,7 @@ flowchart TB
                 JPATH["JointPath<br/>(N, 6) radians"]
 
                 BUILDER["TrajectoryBuilder"]
-                TRAJ["Trajectory<br/>(M, 6) steps @ 250 Hz"]
+                TRAJ["Trajectory<br/>(M, 6) steps @ 100 Hz"]
             end
 
             subgraph Online["Online (real-time per-tick)"]
@@ -212,7 +236,7 @@ flowchart TB
 ### Component summary
 
 - **Client** (`parol6.client`): `AsyncRobotClient` (async UDP), `RobotClient` (sync wrapper), `ServerManager` (subprocess lifecycle)
-- **Controller** (`parol6.server.controller`): UDP command server, 250 Hz control loop, command queue, status broadcasting
+- **Controller** (`parol6.server.controller`): UDP command server, 100 Hz control loop, command queue, status broadcasting
 - **Motion pipeline** (`parol6.motion`): Offline trajectory generation (TOPP-RA, Ruckig, etc.) and online streaming executors
 - **Transports** (`parol6.server.transports`): `SerialTransport` (hardware), `MockSerialProcessAdapter` (simulator via shared memory)
 - **Status subscription** (`parol6.client.status_subscriber`): Multicast/unicast listener for push-based status updates
@@ -329,8 +353,8 @@ Add a new tool by extending `TOOL_CONFIGS` with a name, description, and `transf
 
 
 ## Environment variables
-- `PAROL6_CONTROL_RATE_HZ` — control loop frequency in Hz (default 250)
-- `PAROL6_STATUS_RATE_HZ` — STATUS broadcast rate in Hz (default 50)
+- `PAROL6_CONTROL_RATE_HZ` — control loop frequency in Hz (default 100)
+- `PAROL6_STATUS_RATE_HZ` — STATUS broadcast rate in Hz (default 50; tests use 20 Hz to reduce CI load)
 - `PAROL6_STATUS_STALE_S` — skip broadcast if cache is older than this (default 0.2)
 - `PAROL6_MCAST_GROUP` — multicast group for status (default 239.255.0.101)
 - `PAROL6_MCAST_PORT` — multicast port for status (default 50510)
