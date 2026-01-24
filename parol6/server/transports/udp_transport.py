@@ -43,6 +43,8 @@ class UDPTransport:
         self._running = False
         self._rx = bytearray(self.buffer_size)
         self._rxv = memoryview(self._rx)
+        # Pre-allocated buffer for poll_receive_all (avoids list allocation per call)
+        self._recv_all_buf: list[tuple[str, tuple[str, int]]] = []
 
     def create_socket(self) -> bool:
         """
@@ -55,9 +57,8 @@ class UDPTransport:
             # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            # Use blocking mode with short timeout for responsive shutdown
-            self.socket.setblocking(True)
-            self.socket.settimeout(0.25)
+            # Non-blocking mode for polling
+            self.socket.setblocking(False)
 
             # Allow address/port reuse for fast restarts
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -106,36 +107,37 @@ class UDPTransport:
             finally:
                 self.socket = None
 
-    def receive_one(self) -> tuple[str, tuple[str, int]] | None:
-        """
-        Blocking receive of a single datagram using recvfrom_into with a short timeout.
-        Returns (message_str, address) on success, or None on timeout/error.
-        """
+    def poll_receive(self) -> tuple[str, tuple[str, int]] | None:
+        """Non-blocking receive. Returns None if no data available."""
         if not self.socket or not self._running:
             return None
         try:
             nbytes, address = self.socket.recvfrom_into(self._rxv)
             if nbytes <= 0:
                 return None
-            try:
-                # Decode ASCII payload - only strip if needed to avoid extra allocation
-                message_str = (
-                    self._rxv[:nbytes].tobytes().decode("ascii", errors="ignore")
-                )
-                if message_str.endswith(("\r", "\n")):
-                    message_str = message_str.rstrip("\r\n")
-            except Exception:
-                logger.warning(f"Failed to decode UDP datagram from {address}")
-                return None
+            message_str = self._rxv[:nbytes].tobytes().decode("ascii", errors="ignore")
+            if message_str.endswith(("\r", "\n")):
+                message_str = message_str.rstrip("\r\n")
             return (message_str, address)
-        except TimeoutError:
+        except BlockingIOError:
             return None
         except OSError as e:
-            logger.error(f"Socket error receiving UDP message: {e}")
+            if e.errno in (11, 35):  # EAGAIN/EWOULDBLOCK
+                return None
+            logger.error(f"Socket error in poll_receive: {e}")
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error in receive_one: {e}")
-            return None
+
+    def poll_receive_all(
+        self, max_count: int = 10
+    ) -> list[tuple[str, tuple[str, int]]]:
+        """Non-blocking batch receive up to max_count. Reuses internal buffer."""
+        self._recv_all_buf.clear()
+        for _ in range(max_count):
+            msg = self.poll_receive()
+            if msg is None:
+                break
+            self._recv_all_buf.append(msg)
+        return self._recv_all_buf
 
     def drain_buffer(self) -> int:
         """
@@ -148,34 +150,18 @@ class UDPTransport:
             return 0
 
         drained_count = 0
-        original_timeout = None
-
         try:
-            # Temporarily switch to non-blocking mode
-            original_timeout = self.socket.gettimeout()
-            self.socket.setblocking(False)
-
-            # Read all pending messages until buffer is empty
+            # Socket is already non-blocking; read all pending messages
             while True:
                 try:
                     nbytes, _ = self.socket.recvfrom_into(self._rxv)
                     if nbytes > 0:
                         drained_count += 1
-                except OSError:
+                except (BlockingIOError, OSError):
                     # No more data available (expected)
                     break
-
-            # Restore original timeout
-            self.socket.settimeout(original_timeout)
-
         except Exception as e:
             logger.error(f"Error draining UDP buffer: {e}")
-            # Try to restore timeout even if draining failed
-            try:
-                if original_timeout is not None:
-                    self.socket.settimeout(original_timeout)
-            except Exception as e2:
-                logger.debug("Failed to restore UDP socket timeout: %s", e2)
 
         return drained_count
 

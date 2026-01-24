@@ -80,6 +80,14 @@ STATUS_UNICAST_HOST: str = os.getenv("PAROL6_STATUS_UNICAST_HOST", "127.0.0.1")
 STATUS_RATE_HZ: float = float(os.getenv("PAROL6_STATUS_RATE_HZ", "50"))
 STATUS_STALE_S: float = float(os.getenv("PAROL6_STATUS_STALE_S", "0.2"))
 
+# Validate STATUS_RATE_HZ divides evenly into CONTROL_RATE_HZ for polling
+if int(CONTROL_RATE_HZ) % int(STATUS_RATE_HZ) != 0:
+    raise ValueError(
+        f"STATUS_RATE_HZ ({STATUS_RATE_HZ}) must divide evenly into "
+        f"CONTROL_RATE_HZ ({CONTROL_RATE_HZ})"
+    )
+STATUS_BROADCAST_INTERVAL: int = int(CONTROL_RATE_HZ) // int(STATUS_RATE_HZ)
+
 # Loop timing tuning - busy threshold before deadline to switch from sleep to busy-wait
 BUSY_THRESHOLD_MS: float = float(os.getenv("PAROL6_BUSY_THRESHOLD_MS", "1.0"))
 

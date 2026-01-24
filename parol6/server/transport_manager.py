@@ -135,11 +135,6 @@ class TransportManager:
             if self.transport:
                 if self.transport.is_connected():
                     logger.info("Connected to transport: %s", self.transport.port)
-                    try:
-                        self.transport.start_reader(self._shutdown_event)
-                        logger.info("Serial reader thread started")
-                    except Exception as e:
-                        logger.warning("Failed to start serial reader: %s", e)
                 else:
                     logger.warning(
                         "Serial transport not connected at startup (port=%s)",
@@ -157,6 +152,12 @@ class TransportManager:
         """Check if transport is connected."""
         return self.transport is not None and self.transport.is_connected()
 
+    def poll_serial(self) -> bool:
+        """Poll serial for new data. Called each tick."""
+        if not self.transport or not self.transport.is_connected():
+            return False
+        return self.transport.poll_read()
+
     def auto_reconnect(self) -> bool:
         """Attempt reconnection if disconnected.
 
@@ -167,14 +168,10 @@ class TransportManager:
             return False
 
         if self.transport.auto_reconnect():
-            try:
-                self.transport.start_reader(self._shutdown_event)
-                self.first_frame_received = False
-                self._reset_tx_keepalive()
-                logger.info("Serial reader thread started (after reconnect)")
-                return True
-            except Exception as e:
-                logger.warning("Failed to start serial reader after reconnect: %s", e)
+            self.first_frame_received = False
+            self._reset_tx_keepalive()
+            logger.info("Serial reconnected")
+            return True
 
         return False
 
@@ -195,11 +192,10 @@ class TransportManager:
                 baudrate=self.serial_baudrate,
                 auto_find_port=False,
             )
-            if self.transport and hasattr(self.transport, "start_reader"):
-                self.transport.start_reader(self._shutdown_event)
+            if self.transport and self.transport.is_connected():
                 self.first_frame_received = False
                 self._reset_tx_keepalive()
-                logger.info("Serial reader thread started (after SET_PORT)")
+                logger.info("Serial switched to port %s", port)
                 return True
         except Exception as e:
             logger.warning(f"Failed to (re)connect serial on SET_PORT: {e}")
@@ -258,10 +254,9 @@ class TransportManager:
                     )
 
             if self.transport:
-                self.transport.start_reader(self._shutdown_event)
                 self.first_frame_received = False
                 self._reset_tx_keepalive()
-                logger.info("Serial reader thread started (after SIMULATOR toggle)")
+                logger.info("Simulator mode toggled to %s", "on" if enable else "off")
 
                 # Wait for first frame with timeout
                 if not self._wait_for_first_frame(timeout=0.5):

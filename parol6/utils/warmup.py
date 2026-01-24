@@ -59,6 +59,7 @@ from parol6.server.loop_timer import (
     _quickselect_partition,
 )
 from parol6.server.status_cache import _update_arrays
+from parol6.utils.se3_utils import arrays_equal_6
 from parol6.server.transport_manager import _arrays_changed
 from parol6.server.transports.mock_serial_transport import (
     _encode_payload_jit,
@@ -160,6 +161,10 @@ def warmup_jit() -> float:
     fuse_2_bytes(0, 0)
 
     dummy_3x3 = np.eye(3, dtype=np.float64)
+
+    # parol6/utils/se3_utils.py - arrays_equal_6
+    arrays_equal_6(dummy_6i, dummy_6i)
+    arrays_equal_6(dummy_6f, dummy_6f)
 
     # parol6/server/status_cache.py
     dummy_5u8 = np.zeros(5, dtype=np.uint8)

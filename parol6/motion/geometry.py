@@ -423,26 +423,31 @@ def joint_path_to_tcp_poses(
     Returns:
         (N, 6) array of [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] poses
     """
+    from roboticstoolbox.fknm import ETS_fkine
     from scipy.spatial.transform import Rotation
 
     if robot is None:
-        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+        # Use cached fknm from state module (common case)
+        from parol6.server.state import _get_cached_ets
 
-        robot = PAROL6_ROBOT.robot
-
-    if robot is None:
-        raise ValueError("Robot model not available")
+        fknm = _get_cached_ets()
+    else:
+        # Custom robot passed - build ETS directly
+        fknm = robot.ets()._fknm
 
     n_points = len(joint_positions)
     tcp_poses = np.empty((n_points, 6), dtype=np.float64)
 
+    # Pre-allocate FK output buffer (Fortran order for roboticstoolbox)
+    T = np.asfortranarray(np.eye(4, dtype=np.float64))
+
     for i, q in enumerate(joint_positions):
-        # Forward kinematics returns SE3 (spatialmath)
-        T = robot.fkine(q)
+        # Direct C FK with pre-allocated buffer (no allocation per call)
+        ETS_fkine(fknm, q, None, None, True, T)
         # Extract position (meters -> mm)
-        tcp_poses[i, :3] = T.t * 1000.0  # m -> mm
-        # Extract orientation - T.R is the rotation matrix
-        rpy = Rotation.from_matrix(T.R).as_euler("xyz", degrees=True)
+        tcp_poses[i, :3] = T[:3, 3] * 1000.0  # m -> mm
+        # Extract orientation from rotation matrix
+        rpy = Rotation.from_matrix(T[:3, :3]).as_euler("xyz", degrees=True)
         tcp_poses[i, 3:] = rpy
 
     return tcp_poses

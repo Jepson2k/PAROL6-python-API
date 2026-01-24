@@ -1,11 +1,10 @@
 """
-Thread-safe cache of the aggregate STATUS payload components and formatted ASCII.
+Cache of the aggregate STATUS payload components and formatted ASCII.
 
 The heavy IK enablement computations are delegated to a separate subprocess
 via IKWorkerClient for true CPU parallelism.
 """
 
-import threading
 import time
 
 import numpy as np
@@ -55,7 +54,7 @@ def _update_arrays(
 
 class StatusCache:
     """
-    Thread-safe cache of the aggregate STATUS payload components and formatted ASCII.
+    Cache of the aggregate STATUS payload components and formatted ASCII.
 
     Fields:
       - angles_deg: 6 floats
@@ -67,8 +66,6 @@ class StatusCache:
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
-
         # Public snapshots (materialized only when they change)
         self.angles_deg: np.ndarray = np.zeros((6,), dtype=np.float64)
         self.speeds: np.ndarray = np.zeros((6,), dtype=np.int32)
@@ -212,44 +209,42 @@ class StatusCache:
             or action_changed
         )
 
-        # Minimal critical section - only update cached values
+        # Update cached values
         if changed_any:
-            with self._lock:
-                if new_angles_ascii is not None:
-                    self._angles_ascii = new_angles_ascii
-                    self._pose_ascii = new_pose_ascii  # type: ignore[assignment]
-                if results is not None:
-                    self._joint_en_ascii = new_joint_en_ascii  # type: ignore[assignment]
-                    self._cart_en_wrf_ascii = new_cart_en_wrf_ascii  # type: ignore[assignment]
-                    self._cart_en_trf_ascii = new_cart_en_trf_ascii  # type: ignore[assignment]
-                if new_io_ascii is not None:
-                    self._io_ascii = new_io_ascii
-                if new_speeds_ascii is not None:
-                    self._speeds_ascii = new_speeds_ascii
-                if new_gripper_ascii is not None:
-                    self._gripper_ascii = new_gripper_ascii
-                if action_changed:
-                    self._action_current = state.action_current
-                    self._action_state = state.action_state
+            if new_angles_ascii is not None:
+                self._angles_ascii = new_angles_ascii
+                self._pose_ascii = new_pose_ascii  # type: ignore[assignment]
+            if results is not None:
+                self._joint_en_ascii = new_joint_en_ascii  # type: ignore[assignment]
+                self._cart_en_wrf_ascii = new_cart_en_wrf_ascii  # type: ignore[assignment]
+                self._cart_en_trf_ascii = new_cart_en_trf_ascii  # type: ignore[assignment]
+            if new_io_ascii is not None:
+                self._io_ascii = new_io_ascii
+            if new_speeds_ascii is not None:
+                self._speeds_ascii = new_speeds_ascii
+            if new_gripper_ascii is not None:
+                self._gripper_ascii = new_gripper_ascii
+            if action_changed:
+                self._action_current = state.action_current
+                self._action_state = state.action_state
 
-                self._ascii_full = (
-                    f"STATUS|POSE={self._pose_ascii}"
-                    f"|ANGLES={self._angles_ascii}"
-                    f"|SPEEDS={self._speeds_ascii}"
-                    f"|IO={self._io_ascii}"
-                    f"|GRIPPER={self._gripper_ascii}"
-                    f"|ACTION_CURRENT={self._action_current}"
-                    f"|ACTION_STATE={self._action_state}"
-                    f"|JOINT_EN={self._joint_en_ascii}"
-                    f"|CART_EN_WRF={self._cart_en_wrf_ascii}"
-                    f"|CART_EN_TRF={self._cart_en_trf_ascii}"
-                )
-                self.last_update_s = now
+            self._ascii_full = (
+                f"STATUS|POSE={self._pose_ascii}"
+                f"|ANGLES={self._angles_ascii}"
+                f"|SPEEDS={self._speeds_ascii}"
+                f"|IO={self._io_ascii}"
+                f"|GRIPPER={self._gripper_ascii}"
+                f"|ACTION_CURRENT={self._action_current}"
+                f"|ACTION_STATE={self._action_state}"
+                f"|JOINT_EN={self._joint_en_ascii}"
+                f"|CART_EN_WRF={self._cart_en_wrf_ascii}"
+                f"|CART_EN_TRF={self._cart_en_trf_ascii}"
+            )
+            self.last_update_s = now
 
     def to_ascii(self) -> str:
         """Return the full ASCII STATUS payload."""
-        with self._lock:
-            return self._ascii_full
+        return self._ascii_full
 
     def mark_serial_observed(self) -> None:
         """Mark that a fresh serial frame was observed just now."""

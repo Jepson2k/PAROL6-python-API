@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
-import threading
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from parol6.motion import CartesianStreamingExecutor, StreamingExecutor
@@ -12,6 +11,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6.utils.se3_utils import arrays_equal_6
 from parol6.config import steps_to_rad
 from parol6.protocol.wire import CommandCode
 
@@ -158,7 +158,9 @@ class ControllerState:
         default_factory=lambda: np.zeros((6,), dtype=np.int32)
     )
     _fkine_last_tool: str = ""
-    _fkine_mat: np.ndarray = field(default_factory=lambda: np.eye(4, dtype=np.float64))
+    _fkine_mat: np.ndarray = field(
+        default_factory=lambda: np.asfortranarray(np.eye(4, dtype=np.float64))
+    )
     _fkine_flat_mm: np.ndarray = field(
         default_factory=lambda: np.zeros((16,), dtype=np.float64)
     )
@@ -265,39 +267,30 @@ class ControllerState:
             self._current_tool = tool_name
             # Apply tool to robot model (rebuilds with tool as final link)
             PAROL6_ROBOT.apply_tool(tool_name)
-            # Cache invalidated via tool_changed check in ensure_fkine_updated
-            logger.info(f"Tool changed to {tool_name}, fkine cache invalidated")
+            # Invalidate FK cache (ETS fknm changes with tool)
+            global _ets_cached_fknm
+            _ets_cached_fknm = None
+            logger.info(f"Tool changed to {tool_name}")
 
 
 logger = logging.getLogger(__name__)
 
 
 class StateManager:
-    """
-    Singleton manager for ControllerState with thread-safe operations.
-
-    This class ensures that all state access is synchronized and provides
-    convenience methods for common state operations.
-    """
+    """Singleton manager for ControllerState."""
 
     _instance: StateManager | None = None
-    _lock: threading.Lock = threading.Lock()
     _state: ControllerState | None = None
 
     def __new__(cls) -> StateManager:
-        """Ensure singleton pattern with thread safety."""
         if cls._instance is None:
-            with cls._lock:
-                # Double-check locking pattern
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
+            cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
         """Initialize the state manager (only runs once due to singleton)."""
         if not hasattr(self, "_initialized"):
             self._state = ControllerState()
-            self._state_lock = threading.RLock()  # Use RLock for re-entrant locking
             self._initialized = True
             self._init_streaming_executor()
             logger.info("StateManager initialized with NumPy buffers")
@@ -321,29 +314,23 @@ class StateManager:
         """
         Get the current controller state.
 
-        Note: This returns the actual state object. Modifications to it
-        should be done through StateManager methods to ensure thread safety.
-
         Returns:
             The current ControllerState instance
         """
-        with self._state_lock:
-            if self._state is None:
-                self._state = ControllerState()
-            return self._state
+        if self._state is None:
+            self._state = ControllerState()
+        return self._state
 
     def reset_state(self) -> None:
         """
         Reset the controller state to a fresh instance.
 
         This is useful at controller startup to ensure buffers are initialized
-        to known defaults. Callers must ensure they hold appropriate locks in
-        higher layers if concurrent access is possible.
+        to known defaults.
         """
-        with self._state_lock:
-            self._state = ControllerState()
-            self._init_streaming_executor()
-            logger.info("Controller state reset")
+        self._state = ControllerState()
+        self._init_streaming_executor()
+        logger.info("Controller state reset")
 
 
 # Global singleton instance accessor
@@ -371,14 +358,32 @@ def get_state() -> ControllerState:
 # Forward kinematics cache management
 # -----------------------------
 
+# Import direct C FK function (bypasses SE3 wrapper for 10x speedup)
+from roboticstoolbox.fknm import ETS_fkine  # noqa: E402
+
+# Cached ETS fknm for direct C FK (invalidated on tool change via invalidate_fkine_cache)
+_ets_cached_fknm = None
+
+
+def _get_cached_ets():
+    """Get cached ETS fknm object, rebuilding if None."""
+    global _ets_cached_fknm
+    if _ets_cached_fknm is None:
+        assert PAROL6_ROBOT.robot is not None
+        _ets_cached_fknm = PAROL6_ROBOT.robot.ets()._fknm
+        logger.debug("ETS fknm cache initialized")
+    return _ets_cached_fknm
+
 
 def invalidate_fkine_cache() -> None:
     """
     Invalidate the fkine cache, forcing recomputation on next access.
-    Call this when the robot model changes (e.g., tool change).
+    Called when the robot model changes (e.g., tool change).
     """
+    global _ets_cached_fknm
     state = get_state()
-    state._fkine_last_tool = ""  # SE3 is pre-allocated, just reset tracking
+    state._fkine_last_tool = ""
+    _ets_cached_fknm = None
     logger.debug("fkine cache invalidated")
 
 
@@ -387,28 +392,23 @@ def ensure_fkine_updated(state: ControllerState) -> None:
     Ensure the fkine cache is up to date with current Position_in and tool.
     If Position_in or current_tool has changed, recalculate fkine and update cache.
 
-    This function is thread-safe when called with state from get_state().
-
     Parameters
     ----------
     state : ControllerState
         The controller state to update
     """
     # Check if cache is valid
-    pos_changed = not np.array_equal(state.Position_in, state._fkine_last_pos_in)
+    pos_changed = not arrays_equal_6(state.Position_in, state._fkine_last_pos_in)
     tool_changed = state.current_tool != state._fkine_last_tool
 
     if pos_changed or tool_changed:
-        # Recompute fkine (zero-allocation using pre-allocated buffer)
+        # Recompute fkine using direct C call (bypasses SE3 wrapper)
         steps_to_rad(state.Position_in, state._fkine_q_rad)
-        assert PAROL6_ROBOT.robot is not None
-        T_raw = cast(Any, PAROL6_ROBOT.robot).fkine(state._fkine_q_rad)
-
-        # Cache as 4x4 matrix (zero-allocation: copy directly into pre-allocated buffer)
-        np.copyto(state._fkine_mat, T_raw.A)
+        fknm = _get_cached_ets()
+        # Pass pre-allocated buffer directly - avoids allocation and copy
+        ETS_fkine(fknm, state._fkine_q_rad, None, None, True, state._fkine_mat)
 
         # Cache as flattened 16-vector with mm translation (zero-allocation)
-        # Use flat view of _fkine_mat, then copy with scaling into _fkine_flat_mm
         state._fkine_flat_mm[:] = state._fkine_mat.ravel()
         state._fkine_flat_mm[3] *= 1000.0  # X translation to mm
         state._fkine_flat_mm[7] *= 1000.0  # Y translation to mm

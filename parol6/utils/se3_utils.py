@@ -10,6 +10,15 @@ from numba import njit  # type: ignore[import-untyped]
 
 
 @njit(cache=True)
+def arrays_equal_6(a: np.ndarray, b: np.ndarray) -> bool:
+    """Fast 6-element array comparison (avoids np.array_equal dispatch overhead)."""
+    for i in range(6):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+@njit(cache=True)
 def se3_identity(out: np.ndarray) -> None:
     """Set out to identity SE3 (4x4)."""
     out[:] = 0.0

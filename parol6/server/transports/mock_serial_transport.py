@@ -10,7 +10,6 @@ controller code.
 import logging
 import time
 from dataclasses import dataclass, field
-from threading import Event
 
 import numpy as np
 
@@ -526,13 +525,12 @@ class MockSerialTransport:
     # ================================
     # Latest-frame API (reduced-copy)
     # ================================
-    def start_reader(self, shutdown_event: Event) -> None:
+    def poll_read(self) -> bool:
         """
-        No-op for lockstep mode. Simulation is ticked by controller via tick_simulation().
-
-        Returns None since no reader thread is needed.
+        No-op for mock transport. Simulation is driven by tick_simulation().
+        Returns True if connected (frame data is always available).
         """
-        return None
+        return self._connected
 
     def _encode_payload_into(self, out_mv: memoryview) -> None:
         """Build a 52-byte payload per firmware layout from simulated state."""

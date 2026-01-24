@@ -61,10 +61,17 @@ async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
         stale_s=1.0,
     )
 
-    broadcaster.start()
+    # StatusBroadcaster is now a polling class - call tick() manually
+    stop_flag = False
+
+    async def _tick_loop():
+        while not stop_flag:
+            broadcaster.tick()
+            await asyncio.sleep(0.05)
+
+    tick_task = asyncio.create_task(_tick_loop())
 
     try:
-        # Give broadcaster a tiny moment to initialize
         await asyncio.sleep(0.05)
         assert broadcaster._use_unicast is True, (
             "Broadcaster did not fall back to unicast"
@@ -86,9 +93,11 @@ async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
         assert ok, "Did not receive a status frame within timeout"
 
     finally:
-        broadcaster.stop()
-        with contextlib.suppress(Exception):
-            broadcaster.join(timeout=1.0)
+        stop_flag = True
+        tick_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tick_task
+        broadcaster.close()
 
 
 @pytest.mark.asyncio
@@ -161,7 +170,17 @@ async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_no
     broadcaster = StatusBroadcaster(
         state_mgr=state_mgr, port=port, iface_ip="127.0.0.1", rate_hz=20.0, stale_s=2.0
     )
-    broadcaster.start()
+
+    # StatusBroadcaster is now a polling class - call tick() manually
+    stop_flag = False
+
+    async def _tick_loop():
+        while not stop_flag:
+            broadcaster.tick()
+            await asyncio.sleep(0.05)
+
+    tick_task = asyncio.create_task(_tick_loop())
+
     try:
         # Allow setup to complete and at least one send to work
         await asyncio.sleep(0.1)
@@ -178,6 +197,8 @@ async def test_multicast_send_errors_should_trigger_fallback_but_currently_do_no
             "Broadcaster did not fall back to unicast on repeated send errors"
         )
     finally:
-        broadcaster.stop()
-        with contextlib.suppress(Exception):
-            broadcaster.join(timeout=1.0)
+        stop_flag = True
+        tick_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tick_task
+        broadcaster.close()

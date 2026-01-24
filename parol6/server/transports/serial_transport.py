@@ -7,16 +7,38 @@ data exchange with the robot hardware.
 
 import logging
 import os
-import threading
 import time
 
+import numba  # type: ignore[import-untyped]
 import numpy as np
 import serial
 
-from parol6.config import INTERVAL_S, get_com_port_with_fallback
+from parol6.config import get_com_port_with_fallback
 from parol6.protocol.wire import pack_tx_frame_into
 
 logger = logging.getLogger(__name__)
+
+
+@numba.njit(cache=True)
+def _append_to_ring_numba(
+    rb: np.ndarray, src: np.ndarray, n: int, cap: int, head: int, tail: int
+) -> tuple[int, int]:
+    """JIT-compiled ring buffer append. Returns (new_head, new_tail)."""
+    avail = (head - tail + cap) % cap
+    free = cap - 1 - avail
+    over = max(0, n - free)
+    if over:
+        tail = (tail + over) % cap
+
+    first = min(n, cap - head)
+    for i in range(first):
+        rb[head + i] = src[i]
+    remain = n - first
+    for i in range(remain):
+        rb[i] = src[first + i]
+    head = (head + n) % cap
+
+    return head, tail
 
 
 class SerialTransport:
@@ -53,12 +75,12 @@ class SerialTransport:
         self.reconnect_interval = 1.0  # seconds between reconnect attempts
         self._reconnect_failures = 0  # count consecutive failures to reduce log spam
 
-        # Reduced-copy latest-frame infrastructure (reader thread will publish here)
-        self._scratch = bytearray(4096)
-        self._scratch_mv = memoryview(self._scratch)
+        # Reduced-copy latest-frame infrastructure (poll_read will publish here)
+        self._scratch = np.zeros(4096, dtype=np.uint8)
+        self._scratch_mv = memoryview(self._scratch.data)
         # Fixed-size ring buffer for RX stream (drop-oldest on overflow)
         _cap = int(os.getenv("PAROL6_SERIAL_RX_RING_CAP", "262144"))
-        self._ring = bytearray(_cap)
+        self._ring = np.zeros(_cap, dtype=np.uint8)
         self._r_cap = _cap
         self._r_head = 0
         self._r_tail = 0
@@ -66,8 +88,6 @@ class SerialTransport:
         self._frame_mv = memoryview(self._frame_buf)[:52]
         self._frame_version = 0
         self._frame_ts = 0.0
-        self._reader_thread: threading.Thread | None = None
-        self._reader_running = False
 
         # Preallocated TX buffer (3 start + 1 len + 52 payload = 56 bytes)
         self._tx_buf = bytearray(56)
@@ -266,110 +286,44 @@ class SerialTransport:
     # ================================
     # Latest-frame API (reduced-copy)
     # ================================
-    def start_reader(self, shutdown_event: threading.Event) -> threading.Thread:
-        """
-        Start a dedicated reader thread that parses incoming frames from the serial port
-        and publishes the latest 52-byte payload into an internal stable buffer.
-
-        Returns the started Thread object. If already running, returns the existing one.
-        """
+    def poll_read(self) -> bool:
+        """Non-blocking read from serial. Returns True if data was read."""
         if not self.is_connected():
-            raise RuntimeError(
-                "SerialTransport.start_reader: serial port not connected"
-            )
+            return False
+        ser = self.serial
+        if not ser or not getattr(ser, "is_open", False):
+            return False
 
-        if self._reader_thread and self._reader_thread.is_alive():
-            return self._reader_thread
+        try:
+            iw = ser.in_waiting
+            if iw == 0:
+                return False
 
-        if self.serial:
-            self.serial.timeout = INTERVAL_S
+            k = min(iw, len(self._scratch))
+            n = ser.readinto(self._scratch_mv[:k])
+            if n is None or n <= 0:
+                return False
 
-        def _run() -> None:
-            self._reader_running = True
-            try:
-                while not shutdown_event.is_set():
-                    if not self.is_connected():
-                        # Backoff a bit to avoid busy loop if disconnected
-                        time.sleep(0.1)
-                        continue
-                    # Race-safe read: hold local ref and check is_open
-                    ser = self.serial
-                    if not ser or not getattr(ser, "is_open", False):
-                        # Disconnected between iterations; back off briefly
-                        time.sleep(0.1)
-                        continue
-                    try:
-                        # Blocking read releases GIL; OS wakes thread on data arrival
-                        first_byte = ser.read(1)
-                        if not first_byte:
-                            continue
+            # Append to ring buffer and parse
+            self._append_to_ring(n)
+            self._parse_ring_for_frames()
+            return True
+        except serial.SerialException as e:
+            logger.error(f"Serial poll error: {e}")
+            self.disconnect()
+            return False
+        except (OSError, TypeError, ValueError, AttributeError):
+            self.disconnect()
+            return False
 
-                        iw = ser.in_waiting
-                        if iw > 0:
-                            k = min(iw, len(self._scratch) - 1)
-                            n = ser.readinto(self._scratch_mv[1 : k + 1])
-                            self._scratch[0] = first_byte[0]
-                            n += 1
-                        else:
-                            self._scratch[0] = first_byte[0]
-                            n = 1
-                    except serial.SerialException as e:
-                        logger.error(f"Serial reader error: {e}")
-                        self.disconnect()
-                        break
-                    except (OSError, TypeError, ValueError, AttributeError):
-                        # fd likely closed during disconnect; stop quietly
-                        logger.info(
-                            "Serial reader stopping due to disconnect/closed FD",
-                            exc_info=False,
-                        )
-                        try:
-                            self.disconnect()
-                        except Exception:
-                            pass
-                        break
-                    except Exception:
-                        logger.exception("Serial reader unexpected exception")
-                        break
-
-                    if not n:
-                        # Timeout or no data; loop to check shutdown_event
-                        continue
-
-                    # Batch append into ring buffer and parse
-                    cap = self._r_cap
-                    head = self._r_head
-                    tail = self._r_tail
-                    rb = self._ring
-                    src = self._scratch
-
-                    # Calculate overflow and adjust tail if needed
-                    avail = (head - tail + cap) % cap
-                    free = (
-                        cap - 1 - avail
-                    )  # keep one slot empty to disambiguate full/empty
-                    over = max(0, n - free)
-                    if over:
-                        tail = (tail + over) % cap
-
-                    # Batch copy into ring buffer using slices
-                    first = min(n, cap - head)
-                    rb[head : head + first] = src[:first]
-                    remain = n - first
-                    if remain:
-                        rb[0:remain] = src[first:n]
-                    head = (head + n) % cap
-
-                    self._r_head = head
-                    self._r_tail = tail
-                    self._parse_ring_for_frames()
-            finally:
-                self._reader_running = False
-
-        t = threading.Thread(target=_run, name="SerialReader", daemon=True)
-        self._reader_thread = t
-        t.start()
-        return t
+    def _append_to_ring(self, n: int) -> tuple[int, int]:
+        """Append n bytes from _scratch to ring buffer. Returns (new_head, new_tail)."""
+        head, tail = _append_to_ring_numba(
+            self._ring, self._scratch, n, self._r_cap, self._r_head, self._r_tail
+        )
+        self._r_head = head
+        self._r_tail = tail
+        return head, tail
 
     def _parse_ring_for_frames(self) -> None:
         """
