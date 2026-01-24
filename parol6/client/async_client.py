@@ -212,9 +212,10 @@ class AsyncRobotClient:
                 await self._multicast_task
             self._multicast_task = None
 
-        # Close UDP transport
+        # Close UDP transport - yield first to let pending writes complete
         if self._transport is not None:
             with contextlib.suppress(Exception):
+                await asyncio.sleep(0)
                 self._transport.close()
             self._transport = None
             self._protocol = None
