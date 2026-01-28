@@ -1,14 +1,15 @@
 from unittest.mock import AsyncMock
 
 from parol6 import RobotClient
+from parol6.protocol.wire import QueryType, ResponseMsg
 
 
-def _pose_payload_from_matrix(m):
-    # Flatten list of lists to comma string after prefix
+def _pose_response(matrix: list) -> ResponseMsg:
+    """Create ResponseMsg with flattened pose matrix."""
     flat = []
-    for row in m:
+    for row in matrix:
         flat.extend(row)
-    return "POSE|" + ",".join(str(x) for x in flat)
+    return ResponseMsg(QueryType.POSE, flat)
 
 
 def test_get_pose_rpy_identity_translation(monkeypatch):
@@ -25,10 +26,9 @@ def test_get_pose_rpy_identity_translation(monkeypatch):
         [0, 0, 1, 30],
         [0, 0, 0, 1],
     ]
-    payload = _pose_payload_from_matrix(mat)
+    response = _pose_response(mat)
 
-    # Patch the async client's _request coroutine used under the hood
-    mock_request = AsyncMock(return_value=payload)
+    mock_request = AsyncMock(return_value=response)
     monkeypatch.setattr(client.async_client, "_request", mock_request)
 
     pose_rpy = client.get_pose_rpy()
@@ -48,8 +48,8 @@ def test_get_pose_rpy_malformed_payload(monkeypatch):
     """
     client = RobotClient()
 
-    # Not 16 elements
-    mock_request = AsyncMock(return_value="POSE|1,2,3")
+    # Not 16 elements - ResponseMsg with too few values
+    mock_request = AsyncMock(return_value=ResponseMsg(QueryType.POSE, [1, 2, 3]))
     monkeypatch.setattr(client.async_client, "_request", mock_request)
 
     pose_rpy = client.get_pose_rpy()

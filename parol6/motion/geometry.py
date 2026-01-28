@@ -287,27 +287,6 @@ class CircularMotion(_ShapeGenerator):
 
         return trajectory
 
-    def _rotation_matrix_from_axis_angle(
-        self, axis: np.ndarray, angle: float
-    ) -> np.ndarray:
-        """Generate rotation matrix using Rodrigues' formula."""
-        axis = axis / np.linalg.norm(axis)
-        K = np.array(
-            [[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]]
-        )
-        return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * K @ K
-
-    def _slerp_orientation(
-        self, start_orient: NDArray, end_orient: NDArray, t: float
-    ) -> np.ndarray:
-        """Spherical linear interpolation for orientation."""
-        r1 = Rotation.from_euler("xyz", start_orient, degrees=True)
-        r2 = Rotation.from_euler("xyz", end_orient, degrees=True)
-        key_rots = Rotation.from_quat(np.stack([r1.as_quat(), r2.as_quat()]))
-        slerp = Slerp(np.array([0.0, 1.0]), key_rots)
-        interp_rot = slerp(np.array([t]))
-        return interp_rot.as_euler("xyz", degrees=True)[0]
-
 
 class SplineMotion(_ShapeGenerator):
     """Generate smooth spline trajectories through waypoints.

@@ -16,15 +16,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
-from parol6.commands.base import TrajectoryMoveCommandBase, parse_opt_float
+from parol6.commands.base import TrajectoryMoveCommandBase
 from parol6.config import (
-    DEFAULT_ACCEL_PERCENT,
     INTERVAL_S,
     LIMITS,
     speed_rad_to_steps,
     steps_to_rad,
 )
 from parol6.motion import JointPath, TrajectoryBuilder
+from parol6.protocol.wire import CmdType, MoveJointCmd, MovePoseCmd
 from parol6.server.command_registry import register_command
 from parol6.utils.errors import IKError
 from parol6.utils.ik import solve_ik
@@ -40,7 +40,6 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
     """Base class for joint-space trajectory commands.
 
     Subclasses must implement:
-    - do_match(): Parse command parameters
     - _get_target_rad(): Return target joint positions in radians
 
     This base class provides:
@@ -48,13 +47,10 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
     - execute_step(): Inherited from TrajectoryMoveCommandBase (uses MotionExecutor)
     """
 
-    __slots__ = ("duration", "velocity_percent", "accel_percent")
+    __slots__ = ()
 
     def __init__(self) -> None:
         super().__init__()
-        self.duration: float | None = None
-        self.velocity_percent: float | None = None
-        self.accel_percent: float = DEFAULT_ACCEL_PERCENT
 
     @abstractmethod
     def _get_target_rad(
@@ -70,24 +66,24 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
 
     def do_setup(self, state: ControllerState) -> None:
         """Build trajectory from current position to target using unified motion pipeline."""
+        assert self.p is not None
+
         steps_to_rad(state.Position_in, self._q_rad_buf)
-        # Pass buffer to _get_target_rad; subclasses must not overwrite it
         target_rad = self._get_target_rad(state, self._q_rad_buf)
-        current_rad = self._q_rad_buf  # Use buffer directly (no copy)
+        current_rad = self._q_rad_buf
 
         profile = state.motion_profile
-        vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
-        accel_pct = (
-            float(self.accel_percent) if self.accel_percent else DEFAULT_ACCEL_PERCENT
-        )
+        duration = self.p.duration if self.p.duration > 0.0 else None
+        vel_pct = self.p.speed_pct if self.p.speed_pct > 0.0 else 100.0
+        accel_pct = self.p.accel_pct
 
         joint_path = JointPath.interpolate(current_rad, target_rad, n_samples=50)
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=profile,
-            velocity_percent=self.velocity_percent,
+            velocity_percent=vel_pct if duration is None else None,
             accel_percent=accel_pct,
-            duration=self.duration,
+            duration=duration,
             dt=INTERVAL_S,
         )
 
@@ -98,7 +94,6 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
             raise ValueError("Trajectory calculation resulted in no steps.")
 
         self._is_cartesian = False
-        # Convert limits from rad/s to steps/s, scaled by user velocity/accel percent
         v_max_rad = LIMITS.joint.hard.velocity * (vel_pct / 100.0)
         a_max_rad = LIMITS.joint.hard.acceleration * (accel_pct / 100.0)
         speed_rad_to_steps(v_max_rad, self._steps_buf)
@@ -114,61 +109,23 @@ class JointMoveCommandBase(TrajectoryMoveCommandBase):
         )
 
 
-@register_command("MOVEJOINT")
+@register_command(CmdType.MOVEJOINT)
 class MoveJointCommand(JointMoveCommandBase):
     """Move the robot's joints to a specific configuration."""
 
-    __slots__ = ("target_angles", "target_radians")
+    PARAMS_TYPE = MoveJointCmd
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.target_angles: np.ndarray | None = None
-        self.target_radians: np.ndarray | None = None
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse MOVEJOINT command parameters.
-
-        Format: MOVEJOINT|j1|j2|j3|j4|j5|j6|duration|speed|accel
-        Example: MOVEJOINT|0|45|90|-45|30|0|None|50|50
-        """
-        if len(parts) != 10:
-            return (
-                False,
-                "MOVEJOINT requires 9 parameters: 6 joint angles, duration, speed, accel",
-            )
-
-        self.target_angles = np.asarray(
-            [float(parts[i]) for i in range(1, 7)], dtype=float
-        )
-
-        self.duration = parse_opt_float(parts[7])
-        self.velocity_percent = parse_opt_float(parts[8])
-        self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
-
-        self.target_radians = np.deg2rad(self.target_angles)
-        for i in range(6):
-            min_rad, max_rad = LIMITS.joint.position.rad[i]
-            if not (min_rad <= self.target_radians[i] <= max_rad):
-                return (
-                    False,
-                    f"Joint {i + 1} target ({self.target_angles[i]} deg) is out of range",
-                )
-
-        self.log_debug(
-            "Parsed MoveJoint: %s, accel=%s%%", self.target_angles, self.accel_percent
-        )
-        self.is_valid = True
-        return (True, None)
+    __slots__ = ()
 
     def _get_target_rad(
         self, state: ControllerState, current_rad: np.ndarray
     ) -> np.ndarray:
         """Return target joint positions in radians."""
-        return np.asarray(self.target_radians, dtype=np.float64)
+        assert self.p is not None
+        return np.deg2rad(self.p.angles)
 
 
-@register_command("MOVEPOSE")
+@register_command(CmdType.MOVEPOSE)
 class MovePoseCommand(JointMoveCommandBase):
     """Move the robot to a specific Cartesian pose via joint-space interpolation.
 
@@ -176,50 +133,28 @@ class MovePoseCommand(JointMoveCommandBase):
     This is different from MoveCart which follows a straight-line Cartesian path.
     """
 
-    __slots__ = ("pose",)
+    PARAMS_TYPE = MovePoseCmd
 
-    def __init__(
-        self, pose: list[float] | None = None, duration: float | None = None
-    ) -> None:
+    __slots__ = ()
+
+    def __init__(self) -> None:
         super().__init__()
-        self.pose: list[float] | None = pose
-        self.duration = duration
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse MOVEPOSE command parameters.
-
-        Format: MOVEPOSE|x|y|z|rx|ry|rz|duration|speed|accel
-        Example: MOVEPOSE|100|200|300|0|0|0|None|50|50
-        """
-        if len(parts) != 10:
-            return (
-                False,
-                "MOVEPOSE requires 9 parameters: x, y, z, rx, ry, rz, duration, speed, accel",
-            )
-
-        self.pose = [float(parts[i]) for i in range(1, 7)]
-        self.duration = parse_opt_float(parts[7])
-        self.velocity_percent = parse_opt_float(parts[8])
-        self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
-
-        self.log_debug("Parsed MovePose: %s, accel=%s%%", self.pose, self.accel_percent)
-        self.is_valid = True
-        return (True, None)
 
     def _get_target_rad(
         self, state: ControllerState, current_rad: np.ndarray
     ) -> np.ndarray:
         """Solve IK for target pose and return joint positions in radians."""
-        assert self.pose is not None
+        assert self.p is not None
+        pose = self.p.pose
+
         target_pose = np.zeros((4, 4), dtype=np.float64)
         se3_from_rpy(
-            self.pose[0] / 1000.0,
-            self.pose[1] / 1000.0,
-            self.pose[2] / 1000.0,
-            np.radians(self.pose[3]),
-            np.radians(self.pose[4]),
-            np.radians(self.pose[5]),
+            pose[0] / 1000.0,
+            pose[1] / 1000.0,
+            pose[2] / 1000.0,
+            np.radians(pose[3]),
+            np.radians(pose[4]),
+            np.radians(pose[5]),
             target_pose,
         )
 

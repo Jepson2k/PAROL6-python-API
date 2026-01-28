@@ -13,8 +13,9 @@ from parol6.commands.base import (
     ExecutionStatusCode,
     MotionCommand,
 )
-from parol6.config import TRACE
-from parol6.server.command_registry import create_command_from_parts
+from parol6.config import MAX_COMMAND_QUEUE_SIZE, TRACE
+from parol6.protocol.wire import decode_command
+from parol6.server.command_registry import create_command_from_struct
 
 if TYPE_CHECKING:
     from parol6.gcode import GcodeInterpreter
@@ -48,7 +49,6 @@ class CommandExecutor:
         state_manager: "StateManager",
         gcode_interpreter: "GcodeInterpreter",
         udp_transport_getter: Callable[[], "UDPTransport | None"],
-        send_ack: Callable[[str, str, str, tuple[str, int]], None],
         sync_mock_from_state: Callable[["ControllerState"], None],
         dt: float,
     ):
@@ -58,18 +58,16 @@ class CommandExecutor:
             state_manager: StateManager for accessing controller state.
             gcode_interpreter: GCODE interpreter for fetching commands.
             udp_transport_getter: Callable that returns current UDP transport.
-            send_ack: Callback to send ACK messages.
             sync_mock_from_state: Callback to sync mock transport after RESET.
             dt: Loop interval for command context.
         """
         self._state_manager = state_manager
         self._gcode_interpreter = gcode_interpreter
         self._get_udp_transport = udp_transport_getter
-        self._send_ack = send_ack
         self._sync_mock_from_state = sync_mock_from_state
         self._dt = dt
 
-        self.command_queue: deque[QueuedCommand] = deque(maxlen=100)
+        self.command_queue: deque[QueuedCommand] = deque(maxlen=MAX_COMMAND_QUEUE_SIZE)
         self.active_command: QueuedCommand | None = None
 
     def _update_queue_state(self, state: "ControllerState") -> None:
@@ -95,6 +93,83 @@ class CommandExecutor:
             dt=self._dt,
         )
 
+    def execute_immediate(
+        self,
+        command: CommandBase,
+        state: "ControllerState",
+        addr: tuple[str, int],
+    ) -> ExecutionStatus:
+        """Execute a command immediately (system or query).
+
+        Args:
+            command: The command to execute.
+            state: Controller state.
+            addr: Client address for context.
+
+        Returns:
+            ExecutionStatus from the command.
+        """
+        command.bind(self._make_command_context(addr))
+        return command.execute_step(state)
+
+    def try_stream_fast_path(
+        self,
+        data: bytes,
+        state: "ControllerState",
+        addr: tuple[str, int],
+    ) -> bool:
+        """Attempt stream fast-path for active streamable command.
+
+        When in stream mode with an active streamable command, this allows
+        updating the command's parameters without full command creation/queueing.
+
+        Args:
+            data: Raw msgpack-encoded command bytes.
+            state: Controller state.
+            addr: Client address for context binding.
+
+        Returns:
+            True if command was handled via fast-path, False otherwise.
+        """
+        if not (state.stream_mode and self.active_command):
+            return False
+
+        active_inst = self.active_command.command
+        if not (isinstance(active_inst, MotionCommand) and active_inst.streamable):
+            return False
+
+        # Decode incoming command
+        try:
+            cmd_struct = decode_command(data)
+        except Exception as e:
+            logger.debug("Stream fast-path decode failed: %s", e)
+            return False
+
+        # Check if struct type matches active command's expected type
+        active_params_type = getattr(active_inst, "PARAMS_TYPE", None)
+        if active_params_type is None or type(cmd_struct) is not active_params_type:
+            return False
+
+        logger.log(
+            TRACE,
+            "stream_fast_path active=%s incoming=%s",
+            type(active_inst).__name__,
+            type(cmd_struct).__name__,
+        )
+
+        # Assign new params (validation already done by decode)
+        active_inst.assign_params(cmd_struct)
+
+        # Re-setup with new params
+        try:
+            active_inst.bind(self._make_command_context(addr))
+            active_inst.setup(state)
+            logger.log(TRACE, "stream_fast_path applied")
+            return True
+        except Exception as e:
+            logger.error("Stream fast-path setup failed: %s", e)
+            return False
+
     def queue_command(
         self,
         address: tuple[str, int] | None,
@@ -112,10 +187,8 @@ class CommandExecutor:
             ExecutionStatus indicating queue status.
         """
         # Check if queue is full
-        if len(self.command_queue) >= 100:
-            logger.warning("Command queue full (max 100)")
-            if command_id and address:
-                self._send_ack(command_id, "FAILED", "Queue full", address)
+        if len(self.command_queue) >= MAX_COMMAND_QUEUE_SIZE:
+            logger.warning("Command queue full (max %d)", MAX_COMMAND_QUEUE_SIZE)
             return ExecutionStatus.failed("Queue full")
 
         # Create queued command
@@ -129,15 +202,7 @@ class CommandExecutor:
         self.command_queue.append(queued_cmd)
 
         # Update queue snapshot
-        state = self._state_manager.get_state()
-        self._update_queue_state(state)
-
-        # Send acknowledgment
-        if command_id and address:
-            queue_pos = len(self.command_queue)
-            self._send_ack(
-                command_id, "QUEUED", f"Position {queue_pos} in queue", address
-            )
+        self._update_queue_state(self._state_manager.get_state())
 
         logger.log(
             TRACE, "Queued command: %s (ID: %s)", type(command).__name__, command_id
@@ -173,22 +238,13 @@ class CommandExecutor:
 
                 # Check if controller is enabled
                 if state.enabled:
-                    # Perform setup and EXECUTING ACK only once
-                    if ac and not getattr(ac, "activated", False):
+                    # Perform setup only once
+                    if not ac.activated:
                         ac.command.setup(state)
 
                         # Update action tracking
                         state.action_current = type(ac.command).__name__
                         state.action_state = "EXECUTING"
-
-                        # Send executing acknowledgment once
-                        if ac.command_id and ac.address:
-                            self._send_ack(
-                                ac.command_id,
-                                "EXECUTING",
-                                f"Starting {type(ac.command).__name__}",
-                                ac.address,
-                            )
 
                         ac.activated = True
                         logger.log(
@@ -219,31 +275,27 @@ class CommandExecutor:
                     and "enqueue" in status.details
                 ):
                     try:
-                        for robot_cmd_str in status.details["enqueue"]:
-                            cmd_obj, _ = create_command_from_parts(
-                                robot_cmd_str.split("|")
-                            )
+                        for cmd_struct in status.details["enqueue"]:
+                            cmd_obj, _, err = create_command_from_struct(cmd_struct)
                             if cmd_obj:
                                 # Queue without address/id for generated commands
                                 self.queue_command(("127.0.0.1", 0), cmd_obj, None)
+                            else:
+                                logger.warning(
+                                    "Failed to create command from struct: %s", err
+                                )
                     except Exception as e:
-                        logger.error(f"Error enqueuing generated commands: {e}")
+                        logger.error("Error enqueuing generated commands: %s", e)
 
                 # Check if command is finished
                 if status.code == ExecutionStatusCode.COMPLETED:
-                    name = type(ac.command).__name__
-                    cid, addr = ac.command_id, ac.address
                     logger.log(
                         TRACE,
                         "Command completed: %s (id=%s) at t=%f",
-                        name,
-                        cid,
+                        type(ac.command).__name__,
+                        ac.command_id,
                         time.time(),
                     )
-
-                    # Send completion acknowledgment
-                    if cid and addr:
-                        self._send_ack(cid, "COMPLETED", status.message, addr)
 
                     # Update action tracking to idle
                     state.action_current = ""
@@ -257,15 +309,13 @@ class CommandExecutor:
                     self.active_command = None
 
                 elif status.code == ExecutionStatusCode.FAILED:
-                    name = type(ac.command).__name__
-                    cid, addr = ac.command_id, ac.address
                     logger.debug(
-                        f"Command failed: {name} (id={cid}) - {status.message} at t={time.time():.6f}"
+                        "Command failed: %s (id=%s) - %s at t=%.6f",
+                        type(ac.command).__name__,
+                        ac.command_id,
+                        status.message,
+                        time.time(),
                     )
-
-                    # Send failure acknowledgment
-                    if cid and addr:
-                        self._send_ack(cid, "FAILED", status.message, addr)
 
                     # Update action tracking to idle
                     state.action_current = ""
@@ -280,7 +330,8 @@ class CommandExecutor:
                         )
                         if removed > 0:
                             logger.info(
-                                f"Cleared {removed} queued streamable commands due to active command failure"
+                                "Cleared %d queued streamable commands due to active command failure",
+                                removed,
                             )
 
                     self._update_queue_state(state)
@@ -289,15 +340,8 @@ class CommandExecutor:
                 return status
 
             except Exception as e:
-                logger.error(f"Command execution error: {e}")
-
-                cid = ac.command_id if ac else None
-                addr = ac.address if ac else None
-
-                if cid and addr:
-                    self._send_ack(cid, "FAILED", f"Execution error: {e!s}", addr)
+                logger.error("Command execution error: %s", e)
                 self.active_command = None
-
                 return ExecutionStatus.failed(f"Execution error: {e!s}", error=e)
 
         return None
@@ -312,17 +356,10 @@ class CommandExecutor:
             return
 
         logger.info(
-            f"Cancelling active command: {type(self.active_command.command).__name__} - {reason}"
+            "Cancelling active command: %s - %s",
+            type(self.active_command.command).__name__,
+            reason,
         )
-
-        # Send cancellation acknowledgment
-        if self.active_command.command_id and self.active_command.address:
-            self._send_ack(
-                self.active_command.command_id,
-                "CANCELLED",
-                reason,
-                self.active_command.address,
-            )
 
         # Update action tracking to idle
         state = self._state_manager.get_state()
@@ -330,6 +367,22 @@ class CommandExecutor:
         state.action_state = "IDLE"
 
         self.active_command = None
+
+    def cancel_active_streamable(self) -> bool:
+        """Cancel active command if it's a streamable motion command.
+
+        Returns:
+            True if a command was cancelled.
+        """
+        ac = self.active_command
+        if (
+            ac
+            and isinstance(ac.command, MotionCommand)
+            and getattr(ac.command, "streamable", False)
+        ):
+            self.active_command = None
+            return True
+        return False
 
     def clear_queue(
         self, reason: str = "Queue cleared"
@@ -345,21 +398,13 @@ class CommandExecutor:
         cleared = []
         while self.command_queue:
             queued_cmd = self.command_queue.popleft()
-
-            # Send cancellation acknowledgment
-            if queued_cmd.command_id and queued_cmd.address:
-                self._send_ack(
-                    queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address
-                )
-
-            # Record cleared command
             if queued_cmd.command_id:
                 status = ExecutionStatus(
                     code=ExecutionStatusCode.CANCELLED, message=reason
                 )
                 cleared.append((queued_cmd.command_id, status))
 
-        logger.info(f"Cleared {len(cleared)} commands from queue: {reason}")
+        logger.info("Cleared %d commands from queue: %s", len(cleared), reason)
 
         # Update action tracking
         state = self._state_manager.get_state()
@@ -389,18 +434,14 @@ class CommandExecutor:
             ):
                 to_remove.append(queued_cmd)
 
-        # Second pass: remove and send acks
+        # Second pass: remove
         for queued_cmd in to_remove:
             self.command_queue.remove(queued_cmd)
             removed_count += 1
-            if queued_cmd.command_id and queued_cmd.address:
-                self._send_ack(
-                    queued_cmd.command_id, "CANCELLED", reason, queued_cmd.address
-                )
 
         if removed_count > 0:
             logger.debug(
-                f"Cleared {removed_count} streamable commands from queue: {reason}"
+                "Cleared %d streamable commands from queue: %s", removed_count, reason
             )
 
         return removed_count
@@ -411,19 +452,20 @@ class CommandExecutor:
             return
 
         try:
-            next_gcode_cmd = self._gcode_interpreter.get_next_command()
-            if not next_gcode_cmd:
+            cmd_struct = self._gcode_interpreter.get_next_command()
+            if cmd_struct is None:
                 return
 
-            # Split once and reuse for both command parsing and logging
-            cmd_parts = next_gcode_cmd.split("|")
-            command_obj, _ = create_command_from_parts(cmd_parts)
+            # Create command directly from the struct
+            command_obj, _, err = create_command_from_struct(cmd_struct)
 
             if command_obj:
                 self.queue_command(("127.0.0.1", 0), command_obj, None)
-                logger.debug(f"Queued GCODE command: {cmd_parts[0]}")
+                logger.debug("Queued GCODE command: %s", type(cmd_struct).__name__)
             else:
-                logger.warning(f"Unknown GCODE command generated: {next_gcode_cmd}")
+                logger.warning(
+                    "Unknown GCODE command: %s - %s", type(cmd_struct).__name__, err
+                )
 
         except Exception as e:
-            logger.error(f"Error fetching GCODE commands: {e}")
+            logger.error("Error fetching GCODE commands: %s", e)

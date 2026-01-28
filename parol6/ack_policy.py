@@ -1,37 +1,36 @@
 import os
 from collections.abc import Callable
 
-SYSTEM_COMMANDS: set[str] = {
-    "STOP",
-    "ENABLE",
-    "DISABLE",
-    "SET_PORT",
-    "STREAM",
-    "SIMULATOR",
-    "SETPROFILE",
-    "RESET",
+from parol6.protocol.wire import CmdType
+
+# System command types (always require ACK)
+SYSTEM_CMD_TYPES: set[CmdType] = {
+    CmdType.STOP,
+    CmdType.ENABLE,
+    CmdType.DISABLE,
+    CmdType.SET_PORT,
+    CmdType.STREAM,
+    CmdType.SIMULATOR,
+    CmdType.SET_PROFILE,
+    CmdType.RESET,
 }
 
-QUERY_COMMANDS: set[str] = {
-    "GET_POSE",
-    "GET_ANGLES",
-    "GET_IO",
-    "GET_GRIPPER",
-    "GET_SPEEDS",
-    "GET_STATUS",
-    "GET_GCODE_STATUS",
-    "GET_LOOP_STATS",
-    "GET_CURRENT_ACTION",
-    "GET_QUEUE",
-    "GET_TOOL",
-    "GETPROFILE",
-    "PING",
+# Query command types (use request/response, not ACK)
+QUERY_CMD_TYPES: set[CmdType] = {
+    CmdType.GET_POSE,
+    CmdType.GET_ANGLES,
+    CmdType.GET_IO,
+    CmdType.GET_GRIPPER,
+    CmdType.GET_SPEEDS,
+    CmdType.GET_STATUS,
+    CmdType.GET_GCODE_STATUS,
+    CmdType.GET_LOOP_STATS,
+    CmdType.GET_CURRENT_ACTION,
+    CmdType.GET_QUEUE,
+    CmdType.GET_TOOL,
+    CmdType.GET_PROFILE,
+    CmdType.PING,
 }
-
-
-def is_localhost(host: str) -> bool:
-    h = (host or "").strip().lower()
-    return h in {"127.0.0.1", "localhost", "::1"}
 
 
 class AckPolicy:
@@ -40,10 +39,9 @@ class AckPolicy:
 
     Rules:
     - If force_ack is set, it overrides everything.
-    - Safety-critical commands always require ack.
-    - If running on localhost/loopback, default to no-ack (low drop risk).
-    - If stream mode is ON, default to no-ack (high-rate streaming traffic).
-    - Otherwise default to no-ack.
+    - System commands always require ack.
+    - Query commands use request/response, not ACKs.
+    - Motion and other commands: ACKs only when forced.
     """
 
     def __init__(
@@ -65,21 +63,19 @@ class AckPolicy:
             force = None
         return AckPolicy(get_stream_mode=get_stream_mode, force_ack=force)
 
-    def requires_ack(self, message: str) -> bool:
+    def requires_ack(self, cmd_type: CmdType) -> bool:
+        """Check if a command type requires an ACK response."""
         # Forced override (e.g., diagnostics)
         if self._force_ack is not None:
             return bool(self._force_ack)
 
-        name = (message or "").split("|", 1)[0].strip().upper()
-
         # System commands always require ACKs
-        if name in SYSTEM_COMMANDS:
+        if cmd_type in SYSTEM_CMD_TYPES:
             return True
 
         # Query commands use request/response, not ACKs
-        if name in QUERY_COMMANDS:
+        if cmd_type in QUERY_CMD_TYPES:
             return False
 
         # Motion and other commands: ACKs only when forced
-        # Localhost and stream mode both favor no-ack by default
         return False

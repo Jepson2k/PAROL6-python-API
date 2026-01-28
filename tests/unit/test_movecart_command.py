@@ -1,101 +1,119 @@
-"""Tests for MoveCartCommand parsing, including acceleration parameter."""
+"""Tests for MoveCartCommand parsing via msgspec structs.
+
+Commands now use msgspec Structs for parameter validation:
+Format: MoveCartCmd(pose, duration, speed_pct, accel_pct)
+"""
+
+import msgspec
+import pytest
 
 from parol6.commands.cartesian_commands import MoveCartCommand
-from parol6.config import DEFAULT_ACCEL_PERCENT
+from parol6.protocol.wire import MoveCartCmd
 
 
 class TestMoveCartCommandParsing:
-    """Test MoveCartCommand.do_match parsing."""
+    """Test MoveCartCmd struct parsing and validation."""
 
-    def test_parse_10_params_with_accel(self):
-        """10-parameter format with explicit acceleration."""
+    def test_parse_with_speed(self):
+        """Parse with explicit speed."""
+        # Create params struct
+        params = MoveCartCmd(
+            pose=[100.0, 200.0, 300.0, 0.0, 0.0, 0.0],
+            speed_pct=50.0,
+            accel_pct=75.0,
+        )
+
         cmd = MoveCartCommand()
-        # Format: MOVECART|x|y|z|rx|ry|rz|duration|speed|accel
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE", "50", "75"]
-        ok, err = cmd.do_match(parts)
+        cmd.assign_params(params)
 
-        assert ok is True
-        assert err is None
-        assert cmd.pose == [100.0, 200.0, 300.0, 0.0, 0.0, 0.0]
-        assert cmd.duration is None
-        assert cmd.velocity_percent == 50.0
-        assert cmd.accel_percent == 75.0
+        assert cmd.p.pose == [100.0, 200.0, 300.0, 0.0, 0.0, 0.0]
+        assert cmd.p.duration == 0.0  # default
+        assert cmd.p.speed_pct == 50.0
+        assert cmd.p.accel_pct == 75.0
 
-    def test_parse_10_params_accel_none(self):
-        """10-parameter format with NONE acceleration should use default."""
+    def test_parse_accel_default(self):
+        """Default acceleration should be 100."""
+        params = MoveCartCmd(
+            pose=[100.0, 200.0, 300.0, 0.0, 0.0, 0.0],
+            speed_pct=50.0,
+        )
+
         cmd = MoveCartCommand()
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE", "50", "NONE"]
-        ok, err = cmd.do_match(parts)
+        cmd.assign_params(params)
 
-        assert ok is True
-        assert err is None
-        assert cmd.accel_percent == DEFAULT_ACCEL_PERCENT
+        assert cmd.p.accel_pct == 100.0  # default
 
     def test_parse_with_duration(self):
         """Parse with duration instead of speed."""
-        cmd = MoveCartCommand()
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "2.5", "NONE", "80"]
-        ok, err = cmd.do_match(parts)
+        params = MoveCartCmd(
+            pose=[100.0, 200.0, 300.0, 0.0, 0.0, 0.0],
+            duration=2.5,
+            accel_pct=80.0,
+        )
 
-        assert ok is True
-        assert err is None
-        assert cmd.duration == 2.5
-        assert cmd.velocity_percent is None
-        assert cmd.accel_percent == 80.0
+        cmd = MoveCartCommand()
+        cmd.assign_params(params)
+
+        assert cmd.p.duration == 2.5
+        assert cmd.p.speed_pct == 0.0  # default
+        assert cmd.p.accel_pct == 80.0
 
     def test_parse_full_accel_range(self):
         """Test acceleration values at boundaries."""
-        cmd = MoveCartCommand()
-
-        # Min accel
-        parts = ["MOVECART", "0", "0", "0", "0", "0", "0", "NONE", "50", "1"]
-        ok, _ = cmd.do_match(parts)
-        assert ok is True
-        assert cmd.accel_percent == 1.0
+        # Min accel (must be > 0)
+        params1 = MoveCartCmd(
+            pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            speed_pct=50.0,
+            accel_pct=0.1,
+        )
+        cmd1 = MoveCartCommand()
+        cmd1.assign_params(params1)
+        assert cmd1.p.accel_pct == 0.1
 
         # Max accel
+        params2 = MoveCartCmd(
+            pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            speed_pct=50.0,
+            accel_pct=100.0,
+        )
         cmd2 = MoveCartCommand()
-        parts = ["MOVECART", "0", "0", "0", "0", "0", "0", "NONE", "50", "100"]
-        ok, _ = cmd2.do_match(parts)
-        assert ok is True
-        assert cmd2.accel_percent == 100.0
+        cmd2.assign_params(params2)
+        assert cmd2.p.accel_pct == 100.0
 
-    def test_parse_too_few_params_fails(self):
-        """Fewer than 10 parameters should fail."""
-        cmd = MoveCartCommand()
-        parts = ["MOVECART", "100", "200", "300", "0", "0", "0", "NONE", "50"]  # Only 9
-        ok, err = cmd.do_match(parts)
+    def test_validation_requires_duration_or_speed(self):
+        """Must have either duration > 0 or speed_pct > 0."""
+        with pytest.raises((ValueError, msgspec.ValidationError)):
+            # Both zero (default) should fail __post_init__
+            MoveCartCmd(pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
-        assert ok is False
-        assert err is not None
-        assert "9 parameters" in err or "parameters" in err.lower()
+    def test_validation_rejects_both_duration_and_speed(self):
+        """Cannot have both duration > 0 and speed_pct > 0."""
+        with pytest.raises((ValueError, msgspec.ValidationError)):
+            MoveCartCmd(
+                pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                duration=2.0,
+                speed_pct=50.0,
+            )
 
-    def test_parse_too_many_params_fails(self):
-        """More than 10 parameters should fail."""
-        cmd = MoveCartCommand()
-        parts = [
-            "MOVECART",
-            "100",
-            "200",
-            "300",
-            "0",
-            "0",
-            "0",
-            "NONE",
-            "50",
-            "75",
-            "EXTRA",
-        ]
-        ok, err = cmd.do_match(parts)
+    def test_validation_pose_length(self):
+        """Pose must have exactly 6 elements when decoded from wire format."""
+        from parol6.protocol.wire import CmdType, decode_command
 
-        assert ok is False
-        assert err is not None
+        # Validation happens during decode from msgpack (wire format)
+        # Create a raw command with wrong pose length
+        import msgspec
 
-    def test_init_defaults(self):
-        """Test that MoveCartCommand initializes with proper defaults."""
+        encoder = msgspec.msgpack.Encoder()
+        # Wire format: [tag, pose, duration, speed_pct, accel_pct]
+        raw = encoder.encode([int(CmdType.MOVECART), [0.0, 0.0, 0.0], 0.0, 50.0, 100.0])
+
+        with pytest.raises(msgspec.ValidationError):
+            decode_command(raw)
+
+    def test_command_init(self):
+        """Test that MoveCartCommand initializes correctly."""
         cmd = MoveCartCommand()
 
-        assert cmd.accel_percent == DEFAULT_ACCEL_PERCENT
-        assert cmd.velocity_percent is None
-        assert cmd.duration is None
-        assert cmd.pose is None  # pose is None until do_match parses a command
+        assert cmd.p is None  # No params until assigned
+        assert cmd.is_valid
+        assert not cmd.is_finished

@@ -52,7 +52,9 @@ from parol6.server.ik_worker import (
     _compute_joint_enable,
     _compute_target_poses,
 )
+from parol6.server.ipc import unpack_ik_response_into
 from parol6.server.loop_timer import (
+    _compute_event_rate,
     _compute_loop_stats,
     _compute_phase_stats,
     _quickselect,
@@ -64,7 +66,6 @@ from parol6.server.transport_manager import _arrays_changed
 from parol6.server.transports.mock_serial_transport import (
     _encode_payload_jit,
     _simulate_motion_jit,
-    _simulate_move_jit,
     _write_frame_jit,
 )
 from parol6.utils.ik import _check_limits_core, _ik_safety_check, unwrap_angles
@@ -200,6 +201,15 @@ def warmup_jit() -> float:
     dummy_targets = np.zeros((12, 4, 4), dtype=np.float64)
     _compute_target_poses(dummy_4x4, 0.001, 0.01, True, _AXIS_DIRS, dummy_targets)
 
+    # parol6/server/ipc - IK response unpacking
+    dummy_ik_buf = np.zeros(44, dtype=np.uint8)
+    dummy_joint_en = np.zeros(12, dtype=np.uint8)
+    dummy_cart_wrf = np.zeros(12, dtype=np.uint8)
+    dummy_cart_trf = np.zeros(12, dtype=np.uint8)
+    unpack_ik_response_into(
+        dummy_ik_buf, 0, dummy_joint_en, dummy_cart_wrf, dummy_cart_trf
+    )
+
     # parol6/protocol/wire.py - frame packing/unpacking
     dummy_tx_frame = memoryview(bytearray(64))
     dummy_grip_3f = np.zeros(3, dtype=np.float64)
@@ -257,6 +267,7 @@ def warmup_jit() -> float:
     _quickselect(dummy_1000f_scratch[:100].copy(), 50)
     _compute_phase_stats(dummy_1000f, dummy_1000f_scratch, 100)
     _compute_loop_stats(dummy_1000f, dummy_1000f_scratch, 100)
+    _compute_event_rate(dummy_1000f, 100, 1.0, 1.0)
 
     # parol6/server/transports/mock_serial_transport.py
     dummy_pos_f = np.zeros(6, dtype=np.float64)
@@ -300,14 +311,6 @@ def warmup_jit() -> float:
         dummy_8u8,  # pos_err_in
         dummy_timing,  # timing_in
         dummy_gripper_in,  # gripper_in
-    )
-    _simulate_move_jit(
-        dummy_pos_f,  # position_f
-        dummy_6i,  # position_out
-        dummy_6f.copy(),  # vmax
-        dummy_6f.copy(),  # jmin
-        dummy_6f.copy(),  # jmax
-        0.004,  # dt
     )
 
     # parol6/utils/se3_utils.py - additional functions

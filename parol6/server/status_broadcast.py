@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class StatusBroadcaster:
     """
-    Broadcasts ASCII STATUS frames via UDP. Called from main loop.
+    Broadcasts binary msgpack STATUS frames via UDP. Called from main loop.
 
     Transport:
       - cfg.STATUS_TRANSPORT: "MULTICAST" (default) or "UNICAST"
@@ -148,7 +148,7 @@ class StatusBroadcaster:
         # MULTICAST: configure multicast TTL/IF with verification and fallback
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
         sock.setblocking(False)
 
         try:
@@ -208,7 +208,7 @@ class StatusBroadcaster:
         if cache.age_s() > self._stale_s:
             return
 
-        payload = cache.to_ascii().encode("ascii", errors="ignore")
+        payload = cache.to_binary()
         sock = self._sock
         if sock is None:
             self._switch_to_unicast()

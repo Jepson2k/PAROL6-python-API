@@ -194,10 +194,16 @@ class TestRuckigExecution:
 
     def test_ruckig_joint_move_command_setup(self):
         """MoveJointCommand with RUCKIG profile sets up trajectory."""
+        from parol6.protocol.wire import MoveJointCmd
+
         cmd = MoveJointCommand()
-        parts = ["MOVEJOINT", "10", "-50", "180", "15", "10", "5", "NONE", "50", "50"]
-        ok, err = cmd.match(parts)
-        assert ok and err is None
+        # Create params struct with speed_pct (duration=0 means use speed)
+        params = MoveJointCmd(
+            angles=[10.0, -50.0, 180.0, 15.0, 10.0, 5.0],
+            speed_pct=50.0,
+            accel_pct=50.0,
+        )
+        cmd.assign_params(params)
 
         state = MockState()
         state.motion_profile = "RUCKIG"

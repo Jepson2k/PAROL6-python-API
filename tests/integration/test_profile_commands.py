@@ -293,8 +293,8 @@ class TestTCPPathAccuracy:
             """Background thread to sample TCP positions."""
             while not sampling_done.is_set():
                 status = client.get_status()
-                if status and "pose" in status:
-                    pos = _extract_position_from_pose_matrix(status["pose"])
+                if status:
+                    pos = _extract_position_from_pose_matrix(status.pose)
                     sampled_positions.append(pos)
                 time.sleep(0.02)  # 50 Hz sampling
 

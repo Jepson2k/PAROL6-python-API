@@ -20,9 +20,6 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=5001, help="UDP port")
     parser.add_argument("--serial", help="Serial port (e.g., /dev/ttyUSB0 or COM3)")
     parser.add_argument("--baudrate", type=int, default=3000000, help="Serial baudrate")
-    parser.add_argument(
-        "--auto-home", action="store_true", help="Queue HOME on startup (default: off)"
-    )
 
     # Verbose logging options
     parser.add_argument(
@@ -104,7 +101,6 @@ def main() -> int:
         udp_port=udp_port,
         serial_port=args.serial,
         serial_baudrate=args.baudrate,
-        auto_home=bool(args.auto_home),
     )
 
     # Create and run controller

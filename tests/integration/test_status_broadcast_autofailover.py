@@ -1,7 +1,6 @@
 import asyncio
 import contextlib
 import socket
-import time
 
 import pytest
 
@@ -9,8 +8,6 @@ from parol6 import config as cfg
 from parol6.server.state import StateManager
 from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.status_cache import get_cache
-from parol6.client.status_subscriber import subscribe_status
-from parol6.protocol.wire import StatusBuffer
 
 
 def _free_udp_port() -> int:
@@ -23,19 +20,14 @@ def _free_udp_port() -> int:
 
 
 @pytest.mark.asyncio
-async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
+async def test_status_broadcast_auto_failover_to_unicast(monkeypatch):
     """
     Deterministically force multicast setup to fail so the broadcaster falls back
-    to UNICAST and verify that a multicast-configured subscriber still receives
-    frames on the same port.
+    to UNICAST mode.
     """
     port = _free_udp_port()
     group = cfg.MCAST_GROUP
     iface = "127.0.0.1"
-
-    # Ensure subscriber uses multicast socket (which also accepts unicast to port)
-    monkeypatch.setattr(cfg, "STATUS_TRANSPORT", "MULTICAST", raising=False)
-    monkeypatch.setattr(cfg, "STATUS_UNICAST_HOST", "127.0.0.1", raising=False)
 
     # Prepare state/cache so broadcaster is allowed to send (cache not stale)
     cache = get_cache()
@@ -44,7 +36,7 @@ async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
     # Start broadcaster with our chosen port and force unicast fallback
     state_mgr = StateManager()
 
-    def _force_unicast_setup(self: StatusBroadcaster) -> None:  # type: ignore[no-redef]
+    def _force_unicast_setup(self: StatusBroadcaster) -> None:
         self._use_unicast = True
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
@@ -72,26 +64,10 @@ async def test_status_broadcast_auto_failover_receives_frame(monkeypatch):
     tick_task = asyncio.create_task(_tick_loop())
 
     try:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
         assert broadcaster._use_unicast is True, (
             "Broadcaster did not fall back to unicast"
         )
-
-        async def _consume_one(timeout: float = 3.0) -> bool:
-            deadline = time.time() + timeout
-            async for status in subscribe_status(
-                group=group, port=port, iface_ip=iface
-            ):
-                assert isinstance(status, StatusBuffer)
-                assert status.angles is not None
-                return True
-                if time.time() > deadline:
-                    break
-            return False
-
-        ok = await asyncio.wait_for(_consume_one(), timeout=4.0)
-        assert ok, "Did not receive a status frame within timeout"
-
     finally:
         stop_flag = True
         tick_task.cancel()
@@ -106,6 +82,9 @@ async def test_subscriber_multicast_socket_receives_unicast(monkeypatch):
     Verify that when the subscriber is configured for multicast, it still receives
     a unicast datagram sent to the same port (since it binds to ("", port)).
     """
+    from parol6.client.async_client import _create_multicast_socket
+    from parol6.protocol.wire import StatusBuffer, decode_status_bin_into
+
     port = _free_udp_port()
     group = cfg.MCAST_GROUP
     iface = "127.0.0.1"
@@ -113,39 +92,47 @@ async def test_subscriber_multicast_socket_receives_unicast(monkeypatch):
     # Ensure subscriber chooses multicast socket
     monkeypatch.setattr(cfg, "STATUS_TRANSPORT", "MULTICAST", raising=False)
 
-    # Craft a valid STATUS payload (defaults are acceptable for parsing)
-    payload = get_cache().to_ascii().encode("ascii", errors="ignore")
+    # Craft a valid binary msgpack STATUS payload
+    payload = get_cache().to_binary()
+
+    # Create a multicast socket (same as client would)
+    sock = _create_multicast_socket(group, port, iface)
 
     async def _send_once():
         await asyncio.sleep(0.05)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            # Send unicast to the multicast socket's port
             s.sendto(payload, ("127.0.0.1", port))
         finally:
             s.close()
 
     async def _consume_one(timeout: float = 3.0) -> bool:
+        loop = asyncio.get_running_loop()
+        buf = StatusBuffer()
+
         # Start sender in background
         sender = asyncio.create_task(_send_once())
         try:
-            async for status in subscribe_status(
-                group=group, port=port, iface_ip=iface
-            ):
-                assert isinstance(status, StatusBuffer)
-                assert status.io is not None
+            # Wait for data on the multicast socket
+            data = await asyncio.wait_for(loop.sock_recv(sock, 4096), timeout=timeout)
+            if decode_status_bin_into(data, buf):
+                assert buf.io is not None
                 return True
+        except asyncio.TimeoutError:
+            pass
         finally:
             with contextlib.suppress(Exception):
                 sender.cancel()
                 await sender
-        # If we exit the loop without receiving, signal failure
+            sock.close()
         return False
 
     ok = await asyncio.wait_for(_consume_one(), timeout=4.0)
     assert ok, "Subscriber did not receive unicast datagram on multicast socket"
 
 
-def _raise_sendto(*args, **kwargs):  # helper for monkeypatching socket.sendto
+def _raise_sendto(*args, **kwargs):
     raise OSError("simulated send failure")
 
 

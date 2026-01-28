@@ -18,6 +18,8 @@ from typing import Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
+from parol6.protocol.wire import CmdType, MsgType, encode, decode
+
 # Precompiled regex patterns for server log normalization
 _SIMPLE_FORMAT_RE = re.compile(
     r"^\s*(\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|TRACE)\s+([A-Za-z0-9_.-]+):\s+(.*)$"
@@ -269,15 +271,22 @@ class ServerManager:
                 recv_timeout = min(poll_interval, deadline - now)
 
                 try:
-                    # send PING
-                    await loop.sock_sendto(sock, b"PING", addr)
+                    # send binary msgpack PING using array format
+                    ping_msg = encode((CmdType.PING,))
+                    await loop.sock_sendto(sock, ping_msg, addr)
 
                     # wait for PONG with a timeout
                     data, _ = await asyncio.wait_for(
-                        loop.sock_recvfrom(sock, 256),
+                        loop.sock_recvfrom(sock, 1024),
                         timeout=recv_timeout,
                     )
-                    if data.decode("ascii", errors="ignore").startswith("PONG"):
+                    resp = decode(data)
+                    # Check for array response format: [RESPONSE, query_type, value]
+                    if (
+                        isinstance(resp, (list, tuple))
+                        and len(resp) >= 1
+                        and resp[0] == MsgType.RESPONSE
+                    ):
                         return True
                 except (asyncio.TimeoutError, OSError):
                     # Timeout or send/recv error -> just try again until deadline
@@ -301,10 +310,19 @@ def is_server_running(
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.settimeout(timeout)
-            sock.sendto(b"PING", (host, port))
-            data, _ = sock.recvfrom(256)
-            return data.decode("ascii", errors="ignore").startswith("PONG")
-    except Exception:
+            # Send binary msgpack PING using array format
+            ping_msg = encode((CmdType.PING,))
+            sock.sendto(ping_msg, (host, port))
+            data, _ = sock.recvfrom(1024)
+            resp = decode(data)
+            # Check for array response format: [RESPONSE, query_type, value]
+            return (
+                isinstance(resp, (list, tuple))
+                and len(resp) >= 1
+                and resp[0] == MsgType.RESPONSE
+            )
+    except (OSError, socket.timeout):
+        # Server not reachable or not responding
         return False
 
 
@@ -347,7 +365,8 @@ def manage_server(
             if is_server_running(host=host, port=port, timeout=0.2):
                 logging.info(f"Successfully started server at {host}:{port}")
                 return manager
-        except Exception:
+        except (OSError, socket.timeout):
+            # Server not ready yet, keep polling
             pass
         time.sleep(0.05)
 

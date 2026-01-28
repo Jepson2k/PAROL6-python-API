@@ -8,6 +8,15 @@ from typing import TYPE_CHECKING
 
 from parol6.commands.base import CommandBase, ExecutionStatus
 from parol6.gcode import GcodeInterpreter
+from parol6.protocol.wire import (
+    CmdType,
+    Command,
+    GcodeCmd,
+    GcodePauseCmd,
+    GcodeProgramCmd,
+    GcodeResumeCmd,
+    GcodeStopCmd,
+)
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_matrix
 
@@ -15,31 +24,25 @@ if TYPE_CHECKING:
     from parol6.server.state import ControllerState
 
 
-@register_command("GCODE")
+@register_command(CmdType.GCODE)
 class GcodeCommand(CommandBase):
     """Execute a single GCODE line."""
 
+    PARAMS_TYPE = GcodeCmd
+
     __slots__ = (
-        "gcode_line",
         "interpreter",
         "generated_commands",
         "current_command_index",
     )
-    gcode_line: str
     interpreter: GcodeInterpreter | None
-    generated_commands: list[str]
+    generated_commands: list[Command]
     current_command_index: int
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GCODE command."""
-        if parts[0].upper() == "GCODE" and len(parts) >= 2:
-            # Rejoin the GCODE line (it might contain | characters)
-            self.gcode_line = "|".join(parts[1:])
-            return True, None
-        return False, None
 
     def do_setup(self, state: "ControllerState") -> None:
         """Set up GCODE interpreter and parse the line."""
+        assert self.p is not None
+
         # Use injected interpreter or create one
         self.interpreter = (
             self.gcode_interpreter or self.interpreter or GcodeInterpreter()
@@ -55,8 +58,8 @@ class GcodeCommand(CommandBase):
                 "Z": current_xyz[2] * 1000,
             }
         )
-        # Parse and store generated robot commands (strings)
-        self.generated_commands = self.interpreter.parse_line(self.gcode_line) or []
+        # Parse and store generated robot Command structs
+        self.generated_commands = self.interpreter.parse_line(self.p.line) or []
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Return generated commands for the controller to enqueue."""
@@ -68,47 +71,29 @@ class GcodeCommand(CommandBase):
         return ExecutionStatus.completed("GCODE parsed", details=details)
 
 
-@register_command("GCODE_PROGRAM")
+@register_command(CmdType.GCODE_PROGRAM)
 class GcodeProgramCommand(CommandBase):
     """Load and execute a GCODE program."""
 
-    __slots__ = ("program_type", "program_data", "interpreter")
-    program_type: str
-    program_data: str
+    PARAMS_TYPE = GcodeProgramCmd
+
+    __slots__ = ("interpreter",)
     interpreter: GcodeInterpreter | None
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GCODE_PROGRAM command."""
-        if parts[0].upper() == "GCODE_PROGRAM" and len(parts) >= 3:
-            self.program_type = parts[1].upper()
-
-            if self.program_type == "FILE":
-                self.program_data = parts[2]
-            elif self.program_type == "INLINE":
-                # Join remaining parts and split by semicolon for inline programs
-                self.program_data = "|".join(parts[2:])
-            else:
-                return False, "Invalid GCODE_PROGRAM type (expected FILE or INLINE)"
-
-            return True, None
-        return False, None
 
     def do_setup(self, state: ControllerState) -> None:
         """Load the GCODE program using the interpreter."""
+        assert self.p is not None
+
         # Use injected interpreter or create one
         self.interpreter = (
             self.gcode_interpreter or self.interpreter or GcodeInterpreter()
         )
         assert self.interpreter is not None
-        if self.program_type == "FILE":
-            if not self.interpreter.load_file(self.program_data):
-                raise RuntimeError(f"Failed to load GCODE file: {self.program_data}")
-        elif self.program_type == "INLINE":
-            program_lines = self.program_data.split(";")
-            if not self.interpreter.load_program(program_lines):
-                raise RuntimeError("Failed to load inline GCODE program")
-        else:
-            raise ValueError("Invalid GCODE_PROGRAM type (expected FILE or INLINE)")
+
+        # Load program lines directly
+        if not self.interpreter.load_program(self.p.lines):
+            raise RuntimeError("Failed to load GCODE program")
+
         # Start program execution
         self.interpreter.start_program()
 
@@ -118,18 +103,14 @@ class GcodeProgramCommand(CommandBase):
         return ExecutionStatus.completed("GCODE program loaded")
 
 
-@register_command("GCODE_STOP")
+@register_command(CmdType.GCODE_STOP)
 class GcodeStopCommand(CommandBase):
     """Stop GCODE program execution."""
 
+    PARAMS_TYPE = GcodeStopCmd
+
     __slots__ = ()
     is_immediate: bool = True
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GCODE_STOP command."""
-        if parts[0].upper() == "GCODE_STOP":
-            return True, None
-        return False, None
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Stop the GCODE program."""
@@ -139,18 +120,14 @@ class GcodeStopCommand(CommandBase):
         return ExecutionStatus.completed("GCODE stopped")
 
 
-@register_command("GCODE_PAUSE")
+@register_command(CmdType.GCODE_PAUSE)
 class GcodePauseCommand(CommandBase):
     """Pause GCODE program execution."""
 
+    PARAMS_TYPE = GcodePauseCmd
+
     __slots__ = ()
     is_immediate: bool = True
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GCODE_PAUSE command."""
-        if parts[0].upper() == "GCODE_PAUSE":
-            return True, None
-        return False, None
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Pause the GCODE program."""
@@ -160,18 +137,14 @@ class GcodePauseCommand(CommandBase):
         return ExecutionStatus.completed("GCODE paused")
 
 
-@register_command("GCODE_RESUME")
+@register_command(CmdType.GCODE_RESUME)
 class GcodeResumeCommand(CommandBase):
     """Resume GCODE program execution."""
 
+    PARAMS_TYPE = GcodeResumeCmd
+
     __slots__ = ()
     is_immediate: bool = True
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a GCODE_RESUME command."""
-        if parts[0].upper() == "GCODE_RESUME":
-            return True, None
-        return False, None
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
         """Resume the GCODE program."""

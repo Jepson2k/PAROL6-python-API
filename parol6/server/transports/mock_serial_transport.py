@@ -222,40 +222,6 @@ def _encode_payload_jit(
     out[51] = int(gripper_in[4]) & 0xFF
 
 
-@njit(cache=True)
-def _simulate_move_jit(
-    position_f: np.ndarray,
-    position_out: np.ndarray,
-    vmax: np.ndarray,
-    jmin: np.ndarray,
-    jmax: np.ndarray,
-    dt: float,
-) -> None:
-    """JIT-compiled position control simulation."""
-    for i in range(6):
-        target = position_out[i]
-        current = position_f[i]
-        err = target - current
-
-        max_step = vmax[i] * dt
-        if max_step < 1.0:
-            max_step = 1.0
-
-        move = err
-        if move > max_step:
-            move = max_step
-        elif move < -max_step:
-            move = -max_step
-
-        new_pos = current + move
-        if new_pos < jmin[i]:
-            new_pos = jmin[i]
-        elif new_pos > jmax[i]:
-            new_pos = jmax[i]
-
-        position_f[i] = new_pos
-
-
 @dataclass
 class MockRobotState:
     """Internal state of the simulated robot."""
@@ -349,7 +315,6 @@ class MockSerialTransport:
         self._state = MockRobotState()
 
         # Frame generation tracking
-        self._frames_to_send: list[bytes] = []
         self._last_frame_time = time.time()
         self._frame_interval = cfg.INTERVAL_S  # match control loop cadence
 
@@ -357,7 +322,6 @@ class MockSerialTransport:
         self._connected = False
 
         # Statistics
-        self._frames_sent = 0
         self._frames_received = 0
 
         # Latest-frame infrastructure (simulation publishes into this buffer)
@@ -567,7 +531,6 @@ class MockSerialTransport:
             "connected": self._connected,
             "timeout": self.timeout,
             "mode": "MOCK_SERIAL",
-            "frames_sent": self._frames_sent,
             "frames_received": self._frames_received,
             "simulation_rate_hz": int(1.0 / self._frame_interval),
             "robot_state": {

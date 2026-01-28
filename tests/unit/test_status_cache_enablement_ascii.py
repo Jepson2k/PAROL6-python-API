@@ -41,15 +41,15 @@ def test_ik_worker_detects_joint_limits():
 
         client.submit_request(q, T_matrix)
 
-        result = None
+        ready = False
         for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            result = client.get_results_if_ready()
-            if result is not None:
+            ready = client.get_results_if_ready()
+            if ready:
                 break
             time.sleep(0.02)
 
-        assert result is not None, "IK worker did not return results"
-        joint_en, _, _ = result
+        assert ready, "IK worker did not return results"
+        joint_en = client.joint_en
 
         # J1 near max: J1+ should be disabled, J1- should be enabled
         assert joint_en[0] == 0, (
@@ -67,15 +67,15 @@ def test_ik_worker_detects_joint_limits():
 
         client.submit_request(q, T_matrix)
 
-        result = None
+        ready = False
         for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            result = client.get_results_if_ready()
-            if result is not None:
+            ready = client.get_results_if_ready()
+            if ready:
                 break
             time.sleep(0.02)
 
-        assert result is not None, "IK worker did not return results for min limit test"
-        joint_en, _, _ = result
+        assert ready, "IK worker did not return results for min limit test"
+        joint_en = client.joint_en
 
         # J1 near min: J1+ should be enabled, J1- should be disabled
         assert joint_en[0] == 1, (
@@ -111,15 +111,15 @@ def test_ik_worker_all_enabled_in_safe_position():
 
         client.submit_request(q_home, T_matrix)
 
-        result = None
+        ready = False
         for _ in range(200):  # Longer timeout for CI - IK worker does 24 IK solves
-            result = client.get_results_if_ready()
-            if result is not None:
+            ready = client.get_results_if_ready()
+            if ready:
                 break
             time.sleep(0.02)
 
-        assert result is not None, "IK worker did not return results in time"
-        joint_en, cart_en_wrf, cart_en_trf = result
+        assert ready, "IK worker did not return results in time"
+        joint_en = client.joint_en
 
         # All joint directions should be enabled in true center position
         assert np.all(joint_en == 1), (

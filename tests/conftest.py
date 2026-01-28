@@ -209,16 +209,29 @@ def server_proc(request, ports: TestPorts, robot_api_env):
 
         # Wait for server to be ready with custom ping logic
         # Needs to be long enough for JIT warmup (~7s) + MockSerial subprocess startup (~10s)
-        timeout = 30.0
+        # Increased to 60s to handle slow CI environments
+        from parol6.protocol.wire import CmdType, encode, decode
+
+        timeout = 60.0
         start_time = time.time()
 
         while time.time() - start_time < timeout:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                     sock.settimeout(1.0)
-                    sock.sendto(b"PING", (ports.server_ip, ports.server_port))
+                    # Send binary msgpack PING using array format
+                    ping_msg = encode((CmdType.PING,))
+                    sock.sendto(ping_msg, (ports.server_ip, ports.server_port))
                     data, _ = sock.recvfrom(256)
-                    if data.decode("utf-8").strip().startswith("PONG"):
+                    # Parse binary msgpack response - expect [RESPONSE, query_type, value]
+                    resp = decode(data)
+                    from parol6.protocol.wire import MsgType
+
+                    if (
+                        isinstance(resp, (list, tuple))
+                        and len(resp) >= 1
+                        and resp[0] == MsgType.RESPONSE
+                    ):
                         return True
             except (TimeoutError, Exception):
                 pass

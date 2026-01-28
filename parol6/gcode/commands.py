@@ -8,6 +8,15 @@ Implements command objects that interface with the existing robot API.
 import numpy as np
 
 from parol6.config import LIMITS
+from parol6.protocol.wire import (
+    Command,
+    DelayCmd,
+    HomeCmd,
+    MoveCartCmd,
+    MovePoseCmd,
+    PneumaticGripperCmd,
+    SmoothArcCenterCmd,
+)
 
 from .coordinates import WorkCoordinateSystem
 from .parser import GcodeToken
@@ -21,14 +30,14 @@ class GcodeCommand:
     def __init__(self):
         super().__init__()
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to robot API command string
+        Convert to robot API command struct.
 
         Returns:
-            Command string for robot API
+            Command struct or None if no command generated
         """
-        return ""
+        return None
 
 
 class G0Command(GcodeCommand):
@@ -59,25 +68,19 @@ class G0Command(GcodeCommand):
         # Convert to robot coordinates [X, Y, Z, RX, RY, RZ]
         self.robot_position = coord_system.gcode_to_robot_coords(self.machine_position)
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to MovePose command for robot API
+        Convert to MovePose command for robot API.
 
-        G0 uses rapid movement (100% speed)
+        G0 uses rapid movement (100% speed).
         """
-        # Format: MOVEPOSE|X|Y|Z|RX|RY|RZ|duration|speed
-        # Where duration="None" for speed-based, speed="None" for duration-based
         x, y, z = self.robot_position[0:3]
         rx, ry, rz = (
             self.robot_position[3:6] if len(self.robot_position) >= 6 else [0, 0, 0]
         )
 
         # G0 uses rapid speed (100%)
-        speed_percentage = 100
-        duration = "None"  # Speed-based movement
-
-        command = f"MOVEPOSE|{x:.3f}|{y:.3f}|{z:.3f}|{rx:.3f}|{ry:.3f}|{rz:.3f}|{duration}|{speed_percentage}"
-        return command
+        return MovePoseCmd(pose=[x, y, z, rx, ry, rz], speed_pct=100.0)
 
 
 class G1Command(GcodeCommand):
@@ -111,13 +114,12 @@ class G1Command(GcodeCommand):
         # Get feed rate from state (mm/min)
         self.feed_rate = state.feed_rate
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to MoveCart command for robot API
+        Convert to MoveCart command for robot API.
 
-        G1 uses linear interpolation with specified feed rate
+        G1 uses linear interpolation with specified feed rate.
         """
-        # Format: MOVECART|X|Y|Z|RX|RY|RZ|duration|speed
         x, y, z = self.robot_position[0:3]
         rx, ry, rz = (
             self.robot_position[3:6] if len(self.robot_position) >= 6 else [0, 0, 0]
@@ -129,15 +131,17 @@ class G1Command(GcodeCommand):
         min_speed_mm_min = max_speed_mm_min * 0.01  # 1% of max
 
         # Map feed rate to percentage (0-100)
-        speed_percentage = np.interp(
-            self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+        speed_pct = float(
+            np.clip(
+                np.interp(
+                    self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+                ),
+                0.01,  # Minimum speed to pass validation
+                100,
+            )
         )
-        speed_percentage = np.clip(speed_percentage, 0, 100)
 
-        duration = "None"  # Speed-based movement
-
-        command = f"MOVECART|{x:.3f}|{y:.3f}|{z:.3f}|{rx:.3f}|{ry:.3f}|{rz:.3f}|{duration}|{speed_percentage:.1f}"
-        return command
+        return MoveCartCmd(pose=[x, y, z, rx, ry, rz], speed_pct=speed_pct)
 
 
 class G2Command(GcodeCommand):
@@ -202,13 +206,11 @@ class G2Command(GcodeCommand):
         # Get feed rate from state
         self.feed_rate = state.feed_rate
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to SMOOTH_ARC_CENTER command for robot API
+        Convert to SmoothArcCenter command for robot API.
 
-        G2 uses clockwise arc interpolation with specified feed rate
-
-        Wire format: SMOOTH_ARC_CENTER|end_x,y,z,rx,ry,rz|center_x,y,z|frame|timing_type|timing_value|[CW]
+        G2 uses clockwise arc interpolation with specified feed rate.
         """
         # Extract positions
         end_x, end_y, end_z = self.robot_end[0:3]
@@ -222,18 +224,24 @@ class G2Command(GcodeCommand):
         max_speed_mm_min = LIMITS.cart.hard.velocity.linear * 1000 * 60
         min_speed_mm_min = max_speed_mm_min * 0.01
 
-        speed_percentage = np.interp(
-            self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+        speed_pct = float(
+            np.clip(
+                np.interp(
+                    self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+                ),
+                0.01,
+                100,
+            )
         )
-        speed_percentage = np.clip(speed_percentage, 0, 100)
-
-        # Build command string with comma-separated coordinates
-        end_str = f"{end_x:.3f},{end_y:.3f},{end_z:.3f},{end_rx:.3f},{end_ry:.3f},{end_rz:.3f}"
-        center_str = f"{center_x:.3f},{center_y:.3f},{center_z:.3f}"
 
         # G2 is clockwise
-        command = f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|WRF|SPEED|{speed_percentage:.1f}|CW"
-        return command
+        return SmoothArcCenterCmd(
+            end_pose=[end_x, end_y, end_z, end_rx, end_ry, end_rz],
+            center=[center_x, center_y, center_z],
+            frame="WRF",
+            speed_pct=speed_pct,
+            clockwise=True,
+        )
 
 
 class G3Command(GcodeCommand):
@@ -298,14 +306,11 @@ class G3Command(GcodeCommand):
         # Get feed rate from state
         self.feed_rate = state.feed_rate
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to SMOOTH_ARC_CENTER command for robot API
+        Convert to SmoothArcCenter command for robot API.
 
-        G3 uses counter-clockwise arc interpolation with specified feed rate
-
-        Wire format: SMOOTH_ARC_CENTER|end_x,y,z,rx,ry,rz|center_x,y,z|frame|timing_type|timing_value
-        (no CW suffix means counter-clockwise)
+        G3 uses counter-clockwise arc interpolation with specified feed rate.
         """
         # Extract positions
         end_x, end_y, end_z = self.robot_end[0:3]
@@ -319,20 +324,24 @@ class G3Command(GcodeCommand):
         max_speed_mm_min = LIMITS.cart.hard.velocity.linear * 1000 * 60
         min_speed_mm_min = max_speed_mm_min * 0.01
 
-        speed_percentage = np.interp(
-            self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+        speed_pct = float(
+            np.clip(
+                np.interp(
+                    self.feed_rate, [min_speed_mm_min, max_speed_mm_min], [0, 100]
+                ),
+                0.01,
+                100,
+            )
         )
-        speed_percentage = np.clip(speed_percentage, 0, 100)
 
-        # Build command string with comma-separated coordinates
-        end_str = f"{end_x:.3f},{end_y:.3f},{end_z:.3f},{end_rx:.3f},{end_ry:.3f},{end_rz:.3f}"
-        center_str = f"{center_x:.3f},{center_y:.3f},{center_z:.3f}"
-
-        # G3 is counter-clockwise (no CW suffix)
-        command = (
-            f"SMOOTH_ARC_CENTER|{end_str}|{center_str}|WRF|SPEED|{speed_percentage:.1f}"
+        # G3 is counter-clockwise
+        return SmoothArcCenterCmd(
+            end_pose=[end_x, end_y, end_z, end_rx, end_ry, end_rz],
+            center=[center_x, center_y, center_z],
+            frame="WRF",
+            speed_pct=speed_pct,
+            clockwise=False,
         )
-        return command
 
 
 class G4Command(GcodeCommand):
@@ -354,13 +363,13 @@ class G4Command(GcodeCommand):
         else:
             self.dwell_time = dwell_time
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to Delay command for robot API
+        Convert to Delay command for robot API.
         """
-        # Format: DELAY|seconds
-        command = f"DELAY|{self.dwell_time:.3f}"
-        return command
+        if self.dwell_time <= 0:
+            return None
+        return DelayCmd(seconds=self.dwell_time)
 
 
 class G28Command(GcodeCommand):
@@ -370,13 +379,11 @@ class G28Command(GcodeCommand):
         """Initialize G28 home command"""
         super().__init__()
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to Home command for robot API
+        Convert to Home command for robot API.
         """
-        # Format: HOME
-        command = "HOME"
-        return command
+        return HomeCmd()
 
 
 class M3Command(GcodeCommand):
@@ -393,14 +400,12 @@ class M3Command(GcodeCommand):
         else:
             self.gripper_port = gripper_port
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to Gripper command for robot API
+        Convert to Gripper command for robot API.
         """
-        # Format: PNEUMATICGRIPPER|action|port
         # M3 maps to gripper close
-        command = f"PNEUMATICGRIPPER|close|{self.gripper_port}"
-        return command
+        return PneumaticGripperCmd(open=False, port=self.gripper_port)
 
 
 class M5Command(GcodeCommand):
@@ -417,14 +422,12 @@ class M5Command(GcodeCommand):
         else:
             self.gripper_port = gripper_port
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to Gripper command for robot API
+        Convert to Gripper command for robot API.
         """
-        # Format: PNEUMATICGRIPPER|action|port
         # M5 maps to gripper open
-        command = f"PNEUMATICGRIPPER|open|{self.gripper_port}"
-        return command
+        return PneumaticGripperCmd(open=True, port=self.gripper_port)
 
 
 class M0Command(GcodeCommand):
@@ -436,12 +439,12 @@ class M0Command(GcodeCommand):
         # This command will need special handling in the interpreter
         self.requires_resume = True
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        M0 doesn't directly map to a robot command
-        It's handled by the interpreter
+        M0 doesn't directly map to a robot command.
+        It's handled by the interpreter.
         """
-        return ""
+        return None
 
 
 class M1Command(GcodeCommand):
@@ -455,12 +458,12 @@ class M1Command(GcodeCommand):
         self.requires_resume = True
         self.is_optional = True
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        M1 doesn't directly map to a robot command
-        It's handled by the interpreter based on optional_stop setting
+        M1 doesn't directly map to a robot command.
+        It's handled by the interpreter based on optional_stop setting.
         """
-        return ""
+        return None
 
 
 class M4Command(GcodeCommand):
@@ -477,19 +480,17 @@ class M4Command(GcodeCommand):
         else:
             self.gripper_port = gripper_port
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        Convert to Gripper command for robot API
+        Convert to Gripper command for robot API.
 
         Note: M4 typically means counter-clockwise spindle rotation.
         For a gripper, this could map to a different action or be unsupported.
-        Currently mapping to gripper toggle or alternative action.
+        Currently mapping to gripper close (same as M3).
         """
         # For PAROL6, M4 might not have a direct gripper equivalent
-        # Could be used for electric gripper with different mode
-        # For now, we'll treat it similar to M3 but document the difference
-        command = f"PNEUMATICGRIPPER|close|{self.gripper_port}"
-        return command
+        # For now, treat it similar to M3
+        return PneumaticGripperCmd(open=False, port=self.gripper_port)
 
 
 class M30Command(GcodeCommand):
@@ -500,12 +501,12 @@ class M30Command(GcodeCommand):
         super().__init__()
         self.is_program_end = True
 
-    def to_robot_command(self) -> str:
+    def to_robot_command(self) -> Command | None:
         """
-        M30 doesn't directly map to a robot command
-        It signals the end of the program
+        M30 doesn't directly map to a robot command.
+        It signals the end of the program.
         """
-        return ""
+        return None
 
 
 def create_command_from_token(

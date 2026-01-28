@@ -1,5 +1,6 @@
 """Loop timing with hybrid sleep + busy-loop for precise deadline scheduling."""
 
+import gc
 import time
 from typing import TYPE_CHECKING
 
@@ -15,8 +16,11 @@ if TYPE_CHECKING:
 # =============================================================================
 # Constants for power-of-2 buffer operations
 # =============================================================================
-BUFFER_SIZE = 1024  # Power of 2 for fast modulo via bitmask
-BUFFER_MASK = BUFFER_SIZE - 1  # 1023 for & operation
+# ~5 seconds of data, rounded up to next power of 2 for fast modulo via bitmask
+_TARGET_BUFFER_SECONDS = 5.0
+_raw_size = int(cfg.CONTROL_RATE_HZ * _TARGET_BUFFER_SECONDS)
+BUFFER_SIZE = 1 << (_raw_size - 1).bit_length()  # Next power of 2
+BUFFER_MASK = BUFFER_SIZE - 1
 
 
 # =============================================================================
@@ -133,6 +137,215 @@ def _compute_loop_stats(
         p99 = max_val
 
     return mean, std, min_val, max_val, p95, p99
+
+
+# =============================================================================
+# EventRateMetrics - track rate of sporadic events
+# =============================================================================
+
+
+@njit(cache=True)
+def _compute_event_rate(
+    buffer: np.ndarray, count: int, now: float, max_age_s: float
+) -> float:
+    """Compute event rate from timestamps in buffer.
+
+    Args:
+        buffer: Circular buffer of event timestamps
+        count: Number of valid entries in buffer
+        now: Current timestamp
+        max_age_s: Only count events within this window
+
+    Returns:
+        Events per second, or 0.0 if insufficient data.
+    """
+    if count < 2:
+        return 0.0
+
+    cutoff = now - max_age_s
+    events_in_window = 0
+    oldest = now
+    newest = 0.0
+
+    for i in range(count):
+        ts = buffer[i]
+        if ts >= cutoff:
+            events_in_window += 1
+            if ts < oldest:
+                oldest = ts
+            if ts > newest:
+                newest = ts
+
+    if events_in_window < 2:
+        return 0.0
+
+    time_span = newest - oldest
+    if time_span < 0.001:
+        return 0.0
+
+    return (events_in_window - 1) / time_span
+
+
+class EventRateMetrics:
+    """Track rate of sporadic events (e.g., commands) with proper decay.
+
+    Unlike LoopMetrics which measures fixed-rate loop periods, this tracks
+    events that may arrive in bursts or not at all. Returns 0 when no
+    recent events.
+
+    Uses a circular buffer of timestamps and numba-accelerated rate calculation.
+    """
+
+    __slots__ = (
+        "_buffer",
+        "_buffer_idx",
+        "_buffer_count",
+        "_buffer_mask",
+        "_last_event_time",
+        "event_count",
+    )
+
+    def __init__(self, buffer_size: int = 64) -> None:
+        """Initialize with a timestamp buffer.
+
+        Args:
+            buffer_size: Number of timestamps to retain. Rounded up to power of 2.
+        """
+        # Round up to power of 2 for fast modulo via bitmask
+        size = 1
+        while size < buffer_size:
+            size <<= 1
+        self._buffer = np.zeros(size, dtype=np.float64)
+        self._buffer_mask = size - 1
+        self._buffer_idx = 0
+        self._buffer_count = 0
+        self._last_event_time = 0.0
+        self.event_count = 0
+
+    def record(self, now: float) -> None:
+        """Record an event at the given timestamp."""
+        self._last_event_time = now
+        self.event_count += 1
+        self._buffer[self._buffer_idx] = now
+        self._buffer_idx = (self._buffer_idx + 1) & self._buffer_mask
+        if self._buffer_count < len(self._buffer):
+            self._buffer_count += 1
+
+    def rate_hz(self, now: float, max_age_s: float = 3.0) -> float:
+        """Calculate event rate from recent events.
+
+        Args:
+            now: Current timestamp (perf_counter)
+            max_age_s: Only count events within this window. Also used to
+                determine staleness - returns 0 if no events within max_age_s.
+
+        Returns:
+            Events per second, or 0.0 if no recent events.
+        """
+        # Fast path: check staleness before calling into numba
+        if self._buffer_count < 2 or now - self._last_event_time > max_age_s:
+            return 0.0
+        return _compute_event_rate(self._buffer, self._buffer_count, now, max_age_s)
+
+    def reset(self) -> None:
+        """Reset all state."""
+        self._buffer[:] = 0.0
+        self._buffer_idx = 0
+        self._buffer_count = 0
+        self._last_event_time = 0.0
+        self.event_count = 0
+
+
+class GCTracker:
+    """Track garbage collection frequency and duration.
+
+    Registers a callback with gc.callbacks to record GC events.
+    Provides rate (collections/sec) and duration statistics.
+    """
+
+    __slots__ = (
+        "_timestamps",
+        "_durations",
+        "_idx",
+        "_count",
+        "_buffer_mask",
+        "_gc_start",
+        "_last_duration",
+        "total_count",
+        "total_time",
+    )
+
+    def __init__(self, buffer_size: int = 64) -> None:
+        # Round up to power of 2
+        size = 1
+        while size < buffer_size:
+            size <<= 1
+        self._timestamps = np.zeros(size, dtype=np.float64)
+        self._durations = np.zeros(size, dtype=np.float64)
+        self._buffer_mask = size - 1
+        self._idx = 0
+        self._count = 0
+        self._gc_start = 0.0
+        self._last_duration = 0.0
+        self.total_count = 0
+        self.total_time = 0.0
+        gc.callbacks.append(self._callback)
+
+    def _callback(self, phase: str, info: dict) -> None:
+        if phase == "start":
+            self._gc_start = time.perf_counter()
+        elif phase == "stop":
+            now = time.perf_counter()
+            duration = now - self._gc_start
+            self._last_duration = duration
+            self.total_count += 1
+            self.total_time += duration
+            idx = self._idx & self._buffer_mask
+            self._timestamps[idx] = now
+            self._durations[idx] = duration
+            self._idx += 1
+            if self._count < len(self._timestamps):
+                self._count += 1
+
+    def stats(self, now: float, max_age_s: float = 3.0) -> tuple[float, float]:
+        """Get windowed GC stats: (rate_hz, mean_duration_ms).
+
+        Both values are computed from events within max_age_s window.
+        Returns (0.0, 0.0) if no recent GC events.
+        """
+        if self._count == 0:
+            return 0.0, 0.0
+        last_ts = self._timestamps[(self._idx - 1) & self._buffer_mask]
+        if now - last_ts > max_age_s:
+            return 0.0, 0.0
+
+        # Compute rate and windowed mean duration
+        cutoff = now - max_age_s
+        total_dur = 0.0
+        count_in_window = 0
+        for i in range(self._count):
+            ts = self._timestamps[i]
+            if ts >= cutoff:
+                total_dur += self._durations[i]
+                count_in_window += 1
+
+        if count_in_window < 2:
+            return 0.0, 0.0
+
+        rate = _compute_event_rate(self._timestamps, self._count, now, max_age_s)
+        mean_ms = (total_dur / count_in_window) * 1000.0
+        return rate, mean_ms
+
+    def recent_duration_ms(self) -> float:
+        """Duration of most recent GC in milliseconds."""
+        return self._last_duration * 1000.0
+
+    def shutdown(self) -> None:
+        """Remove callback on shutdown."""
+        try:
+            gc.callbacks.remove(self._callback)
+        except ValueError:
+            pass
 
 
 # =============================================================================
@@ -293,10 +506,17 @@ class LoopMetrics:
         "max_period_s",
         "p95_period_s",
         "p99_period_s",
+        # Overshoot tracking (how much we miss the deadline by)
+        "mean_overshoot_s",
+        "max_overshoot_s",
+        "p99_overshoot_s",
         "_buffer",
         "_scratch",
         "_buffer_idx",
         "_buffer_count",
+        "_overshoot_buffer",
+        "_overshoot_idx",
+        "_overshoot_count",
         "_target_period_s",
         "_prev_time",
         "_last_log_time",
@@ -315,10 +535,17 @@ class LoopMetrics:
         self.max_period_s = 0.0
         self.p95_period_s = 0.0
         self.p99_period_s = 0.0
+        # Overshoot stats
+        self.mean_overshoot_s = 0.0
+        self.max_overshoot_s = 0.0
+        self.p99_overshoot_s = 0.0
         self._buffer = np.zeros(BUFFER_SIZE, dtype=np.float64)
         self._scratch = np.zeros(BUFFER_SIZE, dtype=np.float64)
         self._buffer_idx = 0
         self._buffer_count = 0
+        self._overshoot_buffer = np.zeros(BUFFER_SIZE, dtype=np.float64)
+        self._overshoot_idx = 0
+        self._overshoot_count = 0
         self._target_period_s = 0.0
         self._prev_time = 0.0
         self._last_log_time = 0.0
@@ -390,22 +617,41 @@ class LoopMetrics:
         if self._buffer_count < BUFFER_SIZE:
             self._buffer_count += 1
 
-    def compute_stats(self) -> None:
-        """Compute statistics from buffer."""
-        if self._buffer_count == 0:
-            return
-        mean, std, min_val, max_val, p95, p99 = _compute_loop_stats(
-            self._buffer, self._scratch, self._buffer_count
-        )
-        self.mean_period_s = mean
-        self.std_period_s = std
-        self.min_period_s = min_val
-        self.max_period_s = max_val
-        self.p95_period_s = p95
-        self.p99_period_s = p99
+    def record_overshoot(self, overshoot: float) -> None:
+        """Record busy-loop overshoot (time past deadline) into buffer."""
+        self._overshoot_buffer[self._overshoot_idx] = overshoot
+        self._overshoot_idx = (self._overshoot_idx + 1) & BUFFER_MASK
+        if self._overshoot_count < BUFFER_SIZE:
+            self._overshoot_count += 1
 
-    def reset_stats(self) -> None:
-        """Reset rolling statistics (keeps loop_count and overrun_count)."""
+    def compute_stats(self) -> None:
+        """Compute statistics from buffers."""
+        if self._buffer_count > 0:
+            mean, std, min_val, max_val, p95, p99 = _compute_loop_stats(
+                self._buffer, self._scratch, self._buffer_count
+            )
+            self.mean_period_s = mean
+            self.std_period_s = std
+            self.min_period_s = min_val
+            self.max_period_s = max_val
+            self.p95_period_s = p95
+            self.p99_period_s = p99
+
+        # Compute overshoot stats using the simpler phase stats function
+        if self._overshoot_count > 0:
+            mean, max_val, p99 = _compute_phase_stats(
+                self._overshoot_buffer, self._scratch, self._overshoot_count
+            )
+            self.mean_overshoot_s = mean
+            self.max_overshoot_s = max_val
+            self.p99_overshoot_s = p99
+
+    def reset_stats(self, include_counters: bool = False) -> None:
+        """Reset rolling statistics.
+
+        Args:
+            include_counters: If True, also reset overrun_count (loop_count is preserved).
+        """
         self._buffer.fill(0.0)
         self._buffer_idx = 0
         self._buffer_count = 0
@@ -415,6 +661,15 @@ class LoopMetrics:
         self.max_period_s = 0.0
         self.p95_period_s = 0.0
         self.p99_period_s = 0.0
+        # Reset overshoot stats
+        self._overshoot_buffer.fill(0.0)
+        self._overshoot_idx = 0
+        self._overshoot_count = 0
+        self.mean_overshoot_s = 0.0
+        self.max_overshoot_s = 0.0
+        self.p99_overshoot_s = 0.0
+        if include_counters:
+            self.overrun_count = 0
 
 
 def format_hz_summary(m: LoopMetrics) -> str:
@@ -478,14 +733,7 @@ class LoopTimer:
         Updates metrics (loop_count, period, stats) and handles overruns.
         Call at the end of each loop iteration.
         """
-        # Measure period
-        now = time.perf_counter()
-        period = now - self._prev_t
-        self._prev_t = now
         self.metrics.loop_count += 1
-
-        # Record to rolling buffer
-        self.metrics.record_period(period)
 
         # Compute stats periodically (not every loop)
         if self.metrics.loop_count % self._stats_interval == 0:
@@ -503,7 +751,16 @@ class LoopTimer:
             # Busy-loop for remaining time (precise timing)
             while time.perf_counter() < self._next_deadline:
                 pass
+            # Track how much we overshot the deadline
+            now = time.perf_counter()
+            self.metrics.record_overshoot(now - self._next_deadline)
         else:
             # Overrun - reset deadline to avoid perpetual catch-up
             self.metrics.overrun_count += 1
-            self._next_deadline = time.perf_counter()
+            now = time.perf_counter()
+            self._next_deadline = now
+
+        # Measure period from deadline-to-deadline (not affected by work jitter)
+        if self._prev_t > 0:
+            self.metrics.record_period(now - self._prev_t)
+        self._prev_t = now

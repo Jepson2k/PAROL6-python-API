@@ -118,7 +118,6 @@ class ControllerState:
     command_id_map: dict[Any, tuple[str, tuple[str, int]]] = field(default_factory=dict)
     active_command: Any = None
     active_command_id: str | None = None
-    last_command_time: float = 0.0
 
     # Action tracking for status broadcast and queries
     action_current: str = ""
@@ -147,11 +146,11 @@ class ControllerState:
     p95_period_s: float = 0.0
     p99_period_s: float = 0.0
 
-    # Command frequency metrics
+    # Command frequency metrics (rate tracked by EventRateMetrics in controller)
     command_count: int = 0
-    last_command_period_s: float = 0.0
-    ema_command_period_s: float = 0.0
-    command_timestamps: deque[float] = field(default_factory=lambda: deque(maxlen=10))
+
+    # Flag to signal loop stats reset (picked up by controller)
+    loop_stats_reset_pending: bool = False
 
     # Forward kinematics cache (invalidated when Position_in or current_tool changes)
     _fkine_last_pos_in: np.ndarray = field(
@@ -226,7 +225,6 @@ class ControllerState:
         self.command_id_map.clear()
         self.active_command = None
         self.active_command_id = None
-        self.last_command_time = 0.0
 
         # Action tracking
         self.action_current = ""
@@ -237,11 +235,8 @@ class ControllerState:
         # Gripper mode tracker
         self.gripper_mode_tracker = GripperModeResetTracker()
 
-        # Metrics (keep loop_count for uptime, reset command metrics)
+        # Metrics (keep loop_count for uptime, reset command count)
         self.command_count = 0
-        self.last_command_period_s = 0.0
-        self.ema_command_period_s = 0.0
-        self.command_timestamps.clear()
 
         # Invalidate fkine cache (SE3 is pre-allocated, just reset tracking)
         self._fkine_last_pos_in.fill(0)

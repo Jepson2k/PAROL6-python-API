@@ -12,6 +12,7 @@ from multiprocessing.shared_memory import SharedMemory
 from typing import Tuple
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 
 # track parameter added in Python 3.13
 _SHM_EXTRA_KWARGS = {"track": False} if sys.version_info >= (3, 13) else {}
@@ -149,6 +150,35 @@ class IKOutputLayout:
 
 IK_INPUT_SHM_SIZE = IKInputLayout.TOTAL_SIZE
 IK_OUTPUT_SHM_SIZE = IKOutputLayout.TOTAL_SIZE
+
+
+@njit(cache=True)
+def unpack_ik_response_into(
+    buf_arr: np.ndarray,
+    last_version: int,
+    joint_en: np.ndarray,
+    cart_en_wrf: np.ndarray,
+    cart_en_trf: np.ndarray,
+) -> int:
+    """
+    Check version and copy IK response if changed (zero-alloc hot path).
+
+    Returns new version if data was copied, 0 if unchanged.
+    """
+    # Version is at offset 36, little-endian uint64
+    version = np.uint64(0)
+    for i in range(8):
+        version |= np.uint64(buf_arr[36 + i]) << np.uint64(i * 8)
+
+    if version == last_version or version == 0:
+        return 0
+
+    for i in range(12):
+        joint_en[i] = buf_arr[i]
+        cart_en_wrf[i] = buf_arr[12 + i]
+        cart_en_trf[i] = buf_arr[24 + i]
+
+    return int(version)
 
 
 def pack_ik_request(

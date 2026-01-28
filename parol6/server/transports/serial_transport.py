@@ -13,7 +13,7 @@ import numba  # type: ignore[import-untyped]
 import numpy as np
 import serial
 
-from parol6.config import get_com_port_with_fallback
+from parol6.config import SERIAL_RX_RING_DEFAULT, get_com_port_with_fallback
 from parol6.protocol.wire import pack_tx_frame_into
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,77 @@ def _append_to_ring_numba(
     head = (head + n) % cap
 
     return head, tail
+
+
+@numba.njit(cache=True)
+def _parse_frames_njit(
+    rb: np.ndarray,
+    head: int,
+    tail: int,
+    cap: int,
+    frame_buf: np.ndarray,
+) -> tuple[int, int, bool]:
+    """
+    JIT-compiled frame parser. Scans for 0xFF 0xFF 0xFF start sequence,
+    validates end markers 0x01 0x02, extracts 52-byte payload.
+
+    Returns:
+        new_tail: Updated tail position
+        frames_found: Number of complete frames found
+        has_valid_frame: True if frame_buf contains valid data
+    """
+    START0, START1, START2 = 0xFF, 0xFF, 0xFF
+    END0, END1 = 0x01, 0x02
+    frames_found = 0
+    has_valid = False
+
+    while True:
+        avail = (head - tail + cap) % cap
+        if avail < 4:
+            break
+
+        # Find start sequence
+        found = False
+        while avail >= 3:
+            if (
+                rb[tail] == START0
+                and rb[(tail + 1) % cap] == START1
+                and rb[(tail + 2) % cap] == START2
+            ):
+                found = True
+                break
+            tail = (tail + 1) % cap
+            avail = (head - tail + cap) % cap
+
+        if not found or avail < 4:
+            break
+
+        length = rb[(tail + 3) % cap]
+        total_needed = 4 + length
+        if avail < total_needed:
+            break
+
+        # Validate end markers
+        if length >= 2:
+            e0 = rb[(tail + 4 + length - 2) % cap]
+            e1 = rb[(tail + 4 + length - 1) % cap]
+            if not (e0 == END0 and e1 == END1):
+                tail = (tail + 1) % cap
+                continue
+
+        # Extract payload (first 52 bytes)
+        payload_len = 52 if length >= 52 else length
+        start = (tail + 4) % cap
+        for i in range(payload_len):
+            frame_buf[i] = rb[(start + i) % cap]
+
+        if payload_len >= 52:
+            frames_found += 1
+            has_valid = True
+
+        tail = (tail + total_needed) % cap
+
+    return tail, frames_found, has_valid
 
 
 class SerialTransport:
@@ -79,13 +150,13 @@ class SerialTransport:
         self._scratch = np.zeros(4096, dtype=np.uint8)
         self._scratch_mv = memoryview(self._scratch.data)
         # Fixed-size ring buffer for RX stream (drop-oldest on overflow)
-        _cap = int(os.getenv("PAROL6_SERIAL_RX_RING_CAP", "262144"))
+        _cap = int(os.getenv("PAROL6_SERIAL_RX_RING_CAP", str(SERIAL_RX_RING_DEFAULT)))
         self._ring = np.zeros(_cap, dtype=np.uint8)
         self._r_cap = _cap
         self._r_head = 0
         self._r_tail = 0
-        self._frame_buf = bytearray(64)  # 52-byte payload + headroom
-        self._frame_mv = memoryview(self._frame_buf)[:52]
+        self._frame_buf = np.zeros(64, dtype=np.uint8)
+        self._frame_mv = memoryview(self._frame_buf)[:52]  # type: ignore[arg-type]
         self._frame_version = 0
         self._frame_ts = 0.0
 
@@ -332,67 +403,15 @@ class SerialTransport:
         Frame format:
           [0xFF,0xFF,0xFF] [LEN] [LEN bytes data ...]
         """
-        START0, START1, START2 = 0xFF, 0xFF, 0xFF
-        END0, END1 = self.END_BYTES[0], self.END_BYTES[1]
-        cap = self._r_cap
-        head = self._r_head
-        tail = self._r_tail
-        rb = self._ring
+        new_tail, frames_found, has_valid = _parse_frames_njit(
+            self._ring, self._r_head, self._r_tail, self._r_cap, self._frame_buf
+        )
 
-        def available(h: int, t: int) -> int:
-            return (h - t + cap) % cap
-
-        while available(head, tail) >= 4:
-            # Find start sequence 0xFF 0xFF 0xFF by advancing tail
-            found = False
-            while available(head, tail) >= 3:
-                b0 = rb[tail]
-                b1 = rb[(tail + 1) % cap]
-                b2 = rb[(tail + 2) % cap]
-                if b0 == START0 and b1 == START1 and b2 == START2:
-                    found = True
-                    break
-                tail = (tail + 1) % cap
-            if not found or available(head, tail) < 4:
-                break
-
-            length = rb[(tail + 3) % cap]
-            total_needed = 4 + length
-            if available(head, tail) < total_needed:
-                # Wait for more data
-                break
-
-            # Validate end markers if possible
-            if length >= 2:
-                e0 = rb[(tail + 4 + length - 2) % cap]
-                e1 = rb[(tail + 4 + length - 1) % cap]
-                if not (e0 == END0 and e1 == END1):
-                    # Bad frame; skip one byte to resync
-                    tail = (tail + 1) % cap
-                    continue
-
-            # Publish first 52 bytes if available
-            payload_len = 52 if length >= 52 else length
-            start = (tail + 4) % cap
-            if start + payload_len <= cap:
-                self._frame_buf[:payload_len] = rb[start : start + payload_len]
-            else:
-                first = cap - start
-                self._frame_buf[:first] = rb[start:cap]
-                self._frame_buf[first:payload_len] = rb[0 : payload_len - first]
-
-            if payload_len >= 52:
-                self._frame_version += 1
-                self._frame_ts = time.time()
-
-                # Update Hz tracking if enabled
-                self._update_hz_tracking()
-
-            # Consume this frame
-            tail = (tail + total_needed) % cap
-
-        # Publish updated tail
-        self._r_tail = tail
+        self._r_tail = new_tail
+        if has_valid:
+            self._frame_version += frames_found
+            self._frame_ts = time.time()
+            self._update_hz_tracking()
 
     def get_latest_frame_view(self) -> tuple[memoryview | None, int, float]:
         """

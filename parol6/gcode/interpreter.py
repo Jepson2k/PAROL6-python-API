@@ -9,6 +9,8 @@ import os
 
 import numpy as np
 
+from parol6.protocol.wire import Command
+
 from .commands import create_command_from_token
 from .coordinates import WorkCoordinateSystem
 from .parser import GcodeParser
@@ -47,23 +49,23 @@ class GcodeInterpreter:
         self.is_paused: bool = False
         self.single_block: bool = False
 
-        # Command queue
-        self.command_queue: list[str] = []
+        # Command queue (Command structs from wire protocol)
+        self.command_queue: list[Command] = []
 
         # Error tracking
         self.errors: list[str] = []
 
-    def parse_line(self, gcode_line: str) -> list[str]:
+    def parse_line(self, gcode_line: str) -> list[Command]:
         """
-        Parse a single GCODE line and return robot commands
+        Parse a single GCODE line and return robot commands.
 
         Args:
             gcode_line: Single line of GCODE
 
         Returns:
-            List of robot command strings
+            List of robot Command structs
         """
-        robot_commands = []
+        robot_commands: list[Command] = []
 
         # Parse the line into tokens
         tokens = self.parser.parse_line(gcode_line)
@@ -93,24 +95,26 @@ class GcodeInterpreter:
                 self.coord_system.set_active_system(f"G{int(token.code_number)}")
 
             # Create command object
-            command = create_command_from_token(token, self.state, self.coord_system)
+            gcode_cmd = create_command_from_token(token, self.state, self.coord_system)
 
-            if command:
-                # Get robot command string
-                robot_cmd = command.to_robot_command()
-                if robot_cmd:
+            if gcode_cmd:
+                # Get robot command struct
+                robot_cmd = gcode_cmd.to_robot_command()
+                if robot_cmd is not None:
                     robot_commands.append(robot_cmd)
 
                 # Update position after movement commands
-                if hasattr(command, "target_position"):
-                    self.state.update_position(command.target_position)
+                if hasattr(gcode_cmd, "target_position"):
+                    self.state.update_position(gcode_cmd.target_position)
 
                 # Handle special commands
-                if hasattr(command, "is_program_end") and command.is_program_end:
+                if hasattr(gcode_cmd, "is_program_end") and gcode_cmd.is_program_end:
                     self.stop_program()
-                elif hasattr(command, "requires_resume") and command.requires_resume:
+                elif (
+                    hasattr(gcode_cmd, "requires_resume") and gcode_cmd.requires_resume
+                ):
                     # Check if this is an optional stop (M1)
-                    if hasattr(command, "is_optional") and command.is_optional:
+                    if hasattr(gcode_cmd, "is_optional") and gcode_cmd.is_optional:
                         # Only pause if optional_stop is enabled
                         if self.state.optional_stop:
                             self.pause_program()
@@ -120,22 +124,22 @@ class GcodeInterpreter:
 
         return robot_commands
 
-    def parse_program(self, program: str | list[str]) -> list[str]:
+    def parse_program(self, program: str | list[str]) -> list[Command]:
         """
-        Parse a complete GCODE program
+        Parse a complete GCODE program.
 
         Args:
             program: GCODE program as string or list of lines
 
         Returns:
-            List of all robot commands
+            List of all robot Command structs
         """
         if isinstance(program, str):
             lines = program.split("\n")
         else:
             lines = program
 
-        all_commands = []
+        all_commands: list[Command] = []
         self.errors = []
 
         for line in lines:
@@ -237,12 +241,12 @@ class GcodeInterpreter:
         """
         self.state.optional_stop = enabled
 
-    def get_next_command(self) -> str | None:
+    def get_next_command(self) -> Command | None:
         """
-        Get next robot command from the program
+        Get next robot command from the program.
 
         Returns:
-            Robot command string or None if no more commands
+            Robot Command struct or None if no more commands
         """
         # Return queued commands first
         if self.command_queue:
@@ -266,13 +270,13 @@ class GcodeInterpreter:
 
                 # Return first command
                 if self.command_queue:
-                    command = self.command_queue.pop(0)
+                    cmd = self.command_queue.pop(0)
 
                     # Check for single block mode
                     if self.single_block:
                         self.pause_program()
 
-                    return command
+                    return cmd
 
             # Check for errors
             if self.errors:

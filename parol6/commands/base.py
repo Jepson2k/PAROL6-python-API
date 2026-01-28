@@ -2,20 +2,25 @@
 Base abstractions and helpers for command implementations.
 """
 
-import json
 import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any, ClassVar, overload
+from enum import Enum, auto
+from typing import Any, ClassVar
 
 import numpy as np
 
 from parol6.config import INTERVAL_S, LIMITS, TRACE
+from parol6.protocol.wire import (
+    CmdType,
+    Command,
+    QueryType,
+    pack_error,
+    pack_response,
+)
 from parol6.protocol.wire import CommandCode
 from parol6.server.state import ControllerState
-from parol6.utils.ik import AXIS_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +28,11 @@ logger = logging.getLogger(__name__)
 class ExecutionStatusCode(Enum):
     """Enumeration for command execution status codes."""
 
-    QUEUED = "QUEUED"
-    EXECUTING = "EXECUTING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
+    QUEUED = auto()
+    EXECUTING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    CANCELLED = auto()
 
 
 @dataclass
@@ -84,125 +89,6 @@ class CommandContext:
     dt: float = INTERVAL_S
 
 
-# Parsing utilities (lightweight, shared)
-def _noneify(token: Any) -> str | None:
-    if token is None:
-        return None
-    t = str(token).strip()
-    return None if t == "" or t.upper() in ("NONE", "NULL") else t
-
-
-def parse_int(token: Any) -> int | None:
-    t = _noneify(token)
-    return None if t is None else int(t)
-
-
-def parse_float(token: Any) -> float | None:
-    t = _noneify(token)
-    return None if t is None else float(t)
-
-
-@overload
-def parse_opt_float(token: Any, default: float) -> float: ...
-@overload
-def parse_opt_float(token: Any, default: None = None) -> float | None: ...
-def parse_opt_float(token: Any, default: float | None = None) -> float | None:
-    """Parse float, returning default for None/NONE/NULL tokens."""
-    t = _noneify(token)
-    return default if t is None else float(t)
-
-
-def csv_ints(token: Any) -> list[int]:
-    t = _noneify(token)
-    return [] if t is None else [int(x) for x in t.split(",") if x != ""]
-
-
-def csv_floats(token: Any) -> list[float]:
-    t = _noneify(token)
-    return [] if t is None else [float(x) for x in t.split(",") if x != ""]
-
-
-@dataclass
-class MotionParams:
-    """Common motion command parameters."""
-
-    duration: float | None = None
-    velocity_percent: float | None = None
-    accel_percent: float = 100.0
-
-
-def parse_motion_params(
-    parts: list[str], start_idx: int, default_accel: float = 100.0
-) -> MotionParams:
-    """Parse duration, velocity_percent, accel_percent from parts[start_idx:].
-
-    Expected order: duration, velocity_percent, accel_percent
-    All are optional (None/NONE/NULL tokens become None or default).
-    """
-    duration = parse_opt_float(parts[start_idx]) if start_idx < len(parts) else None
-    velocity = (
-        parse_opt_float(parts[start_idx + 1]) if start_idx + 1 < len(parts) else None
-    )
-    accel = (
-        parse_opt_float(parts[start_idx + 2], default_accel)
-        if start_idx + 2 < len(parts)
-        else default_accel
-    )
-    return MotionParams(
-        duration=duration, velocity_percent=velocity, accel_percent=accel
-    )
-
-
-def parse_bool(token: Any) -> bool:
-    t = (str(token or "")).strip().lower()
-    return t in ("1", "true", "yes", "on")
-
-
-def typed(token: Any, type_: type[Any] = float) -> Any | None:
-    """Parse token with type, supporting None/Null/empty as None."""
-    t = _noneify(token)
-    if t is None:
-        return None
-    if type_ is bool:
-        return parse_bool(t)
-    return type_(t)
-
-
-def expect_len(parts: list[str], n: int, cmd: str) -> None:
-    """Ensure parts list has exactly n elements."""
-    if len(parts) != n:
-        raise ValueError(f"{cmd} requires {n - 1} parameters, got {len(parts) - 1}")
-
-
-def at_least_len(parts: list[str], n: int, cmd: str) -> None:
-    """Ensure parts list has at least n elements."""
-    if len(parts) < n:
-        raise ValueError(
-            f"{cmd} requires at least {n - 1} parameters, got {len(parts) - 1}"
-        )
-
-
-def parse_frame(token: Any) -> str:
-    """Parse and validate frame token (WRF/TRF)."""
-    t = (str(token or "")).strip().upper()
-    if t not in ("WRF", "TRF"):
-        raise ValueError(f"Invalid frame: {token}")
-    return t
-
-
-def parse_axis(token: Any) -> str:
-    """Parse and validate axis token against AXIS_MAP."""
-    t = (str(token or "")).strip().upper()
-    # Convert to match AXIS_MAP format (e.g., +X -> X+, -Y -> Y-)
-    if len(t) == 2 and t[0] in "+-" and t[1] in "XYZ":
-        t = t[1] + t[0]  # Swap sign and axis
-    elif len(t) == 3 and t[0] == "R" and t[2] in "+-":
-        t = "R" + t[1] + t[2]  # Keep RX+ format
-    if t not in AXIS_MAP:
-        raise ValueError(f"Invalid axis: {token}")
-    return t
-
-
 class Countdown:
     """Simple count-down timer."""
 
@@ -243,12 +129,20 @@ class Debouncer:
 class CommandBase(ABC):
     """
     Reusable base for commands with shared lifecycle and safety helpers.
+
+    Commands use typed msgspec structs for parameters. The PARAMS_TYPE class
+    variable indicates which struct type this command expects. The validate()
+    method receives a pre-validated struct and performs business logic validation.
     """
 
     # Set by @register_command decorator; used by controller stream fast-path
-    _registered_name: ClassVar[str] = ""
+    _cmd_type: ClassVar[CmdType | None] = None
+
+    # The params struct type this command expects (override in subclass)
+    PARAMS_TYPE: ClassVar[type[Command] | None] = None
 
     __slots__ = (
+        "p",
         "is_valid",
         "is_finished",
         "error_state",
@@ -263,6 +157,7 @@ class CommandBase(ABC):
     )
 
     def __init__(self) -> None:
+        self.p: Command | None = None  # Params struct, set by validate()
         self.is_valid: bool = True
         self.is_finished: bool = False
         self.error_state: bool = False
@@ -283,7 +178,7 @@ class CommandBase(ABC):
 
     @property
     def name(self) -> str:
-        return self._registered_name or type(self).__name__
+        return self._cmd_type.name if self._cmd_type else type(self).__name__
 
     # Logging helpers (uniform, include command identity)
     def log_trace(self, msg: str, *args: Any) -> None:
@@ -314,31 +209,18 @@ class CommandBase(ABC):
         self.addr = context.addr
         self.gcode_interpreter = context.gcode_interpreter
 
-    @abstractmethod
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
+    def assign_params(self, params: Command) -> None:
         """
-        Check if this command can handle the given message parts.
+        Assign pre-validated params struct.
+
+        Called AFTER msgspec has decoded and validated the struct
+        (via constraints and __post_init__). No validation here.
 
         Args:
-            parts: Pre-split message parts (e.g., ['JOG', '0', '50', '2.0', 'None'])
-
-        Returns:
-            Tuple of (can_handle, error_message)
-            - can_handle: True if this command can process the message
-            - error_message: Optional error message if the message is invalid
+            params: Pre-validated typed struct from msgspec decode
         """
-        raise NotImplementedError
-
-    def match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Wrapper that guards subclass do_match() to avoid propagating exceptions.
-        Centralizes try/except so subclasses don't repeat it.
-        """
-        try:
-            return self.do_match(parts)
-        except Exception as e:
-            # Do not log here to avoid duplicate noise; registry/controller provide lifecycle TRACE.
-            return False, str(e)
+        self.p = params
+        self.is_valid = True
 
     def do_setup(self, state: ControllerState) -> None:
         """Subclass hook for preparation; override in subclasses."""
@@ -413,30 +295,21 @@ class QueryCommand(CommandBase):
     They execute immediately without waiting in the command queue.
     """
 
-    def reply_text(self, message: str) -> None:
-        """Send an opaque ASCII message via UDP."""
+    def reply(self, query_type: QueryType, value: Any) -> None:
+        """Send a query response: [RESPONSE, query_type, value]."""
         if self.udp_transport and self.addr:
             try:
-                self.udp_transport.send_response(message, self.addr)
+                self.udp_transport.send(pack_response(query_type, value), self.addr)
             except Exception as e:
-                self.log_warning("Failed to send UDP reply: %s", e)
+                self.log_warning("Failed to send reply: %s", e)
 
-    def reply_ascii(self, prefix_or_message: str, payload: str | None = None) -> None:
-        """
-        Reply as 'PREFIX|payload' if payload provided; otherwise send prefix_or_message verbatim.
-        """
-        if payload is None:
-            self.reply_text(prefix_or_message)
-        else:
-            self.reply_text(f"{prefix_or_message}|{payload}")
-
-    def reply_json(self, prefix: str, obj: Any) -> None:
-        """Reply with JSON payload."""
-        try:
-            s = json.dumps(obj)
-        except Exception:
-            s = "{}"
-        self.reply_ascii(prefix, s)
+    def reply_error(self, message: str) -> None:
+        """Send an error response: [ERROR, message]."""
+        if self.udp_transport and self.addr:
+            try:
+                self.udp_transport.send(pack_error(message), self.addr)
+            except Exception as e:
+                self.log_warning("Failed to send error reply: %s", e)
 
     def tick(self, state: ControllerState) -> ExecutionStatus:
         """
@@ -469,7 +342,7 @@ class MotionCommand(CommandBase):
     Some motion commands (like jog commands) can be replaced in stream mode.
     """
 
-    streamable: bool = False  # Can be replaced in stream mode (only for jog commands)
+    streamable: bool = False
 
     def __init__(self) -> None:
         super().__init__()

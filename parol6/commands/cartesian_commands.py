@@ -6,19 +6,15 @@ Contains commands for Cartesian space movements: CartesianJog, MovePose, MoveCar
 import logging
 import time
 from abc import abstractmethod
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
-
-if TYPE_CHECKING:
-    pass
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import (
     CART_ANG_JOG_MIN,
     CART_LIN_JOG_MIN,
-    DEFAULT_ACCEL_PERCENT,
     INTERVAL_S,
     LIMITS,
     PATH_SAMPLES,
@@ -26,6 +22,12 @@ from parol6.config import (
     steps_to_rad,
 )
 from parol6.motion import JointPath, TrajectoryBuilder
+from parol6.protocol.wire import (
+    CartJogCmd,
+    CmdType,
+    MoveCartCmd,
+    MoveCartRelTrfCmd,
+)
 from parol6.server.command_registry import register_command
 from parol6.server.state import ControllerState, get_fkine_se3
 from parol6.utils.ik import AXIS_MAP, solve_ik
@@ -40,7 +42,6 @@ from .base import (
     ExecutionStatus,
     MotionCommand,
     TrajectoryMoveCommandBase,
-    parse_opt_float,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,33 +149,22 @@ def _apply_velocity_delta_trf_jit(
 
 
 class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
-    """Base class for Cartesian move commands with straight-line path following.
-
-    Subclasses must implement:
-    - do_match(): Parse command parameters
-    - _compute_target_pose(): Set self.target_pose from parsed parameters
-
-    Supports both streaming mode (real-time IK each tick) and pre-computed trajectories.
-    """
+    """Base class for Cartesian move commands with straight-line path following."""
 
     streamable = True
 
     __slots__ = (
-        "duration",
-        "velocity_percent",
-        "accel_percent",
         "initial_pose",
         "target_pose",
         "_ik_stopping",
+        "_duration",
     )
 
     def __init__(self):
         super().__init__()
-        self.duration: float | None = None
-        self.velocity_percent: float | None = None
-        self.accel_percent: float = DEFAULT_ACCEL_PERCENT
         self.initial_pose: np.ndarray | None = None
         self.target_pose: np.ndarray | None = None
+        self._duration: float | None = None
 
     @abstractmethod
     def _compute_target_pose(self, state: "ControllerState") -> None:
@@ -197,12 +187,14 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
     def _precompute_trajectory(self, state: "ControllerState") -> None:
         """Pre-compute joint trajectory that follows straight-line Cartesian path."""
         assert self.initial_pose is not None and self.target_pose is not None
+        assert self.p is not None
 
         steps_to_rad(state.Position_in, self._q_rad_buf)
         current_rad = self._q_rad_buf
 
-        vel_pct = self.velocity_percent if self.velocity_percent is not None else 100.0
-        acc_pct = self.accel_percent if self.accel_percent is not None else 100.0
+        duration = self.p.duration if self.p.duration > 0.0 else None
+        vel_pct = self.p.speed_pct if self.p.speed_pct > 0.0 else 100.0
+        acc_pct = self.p.accel_pct
 
         cart_poses = []
         interp_buf = np.zeros((4, 4), dtype=np.float64)
@@ -220,9 +212,9 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
         builder = TrajectoryBuilder(
             joint_path=joint_path,
             profile=state.motion_profile,
-            velocity_percent=vel_pct,
+            velocity_percent=vel_pct if duration is None else None,
             accel_percent=acc_pct,
-            duration=self.duration,
+            duration=duration,
             dt=INTERVAL_S,
             cart_vel_limit=cart_vel_max,
             cart_acc_limit=cart_acc_max,
@@ -230,13 +222,13 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
 
         trajectory = builder.build()
         self.trajectory_steps = trajectory.steps
-        self.duration = trajectory.duration
+        self._duration = trajectory.duration
 
         self.log_debug(
             "  -> Pre-computed Cartesian path: profile=%s, steps=%d, duration=%.3fs",
             state.motion_profile,
             len(self.trajectory_steps),
-            float(self.duration),
+            float(self._duration),
         )
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
@@ -255,17 +247,12 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
             # Initialize on first tick, or if executor not active (streaming interrupted)
             if not self._streaming_initialized or not cse.active:
                 assert self.initial_pose is not None and self.target_pose is not None
+                assert self.p is not None
                 # Only sync pose if not already active to preserve velocity
                 if not cse.active:
                     cse.sync_pose(self.initial_pose)
-                vel_pct = (
-                    self.velocity_percent
-                    if self.velocity_percent is not None
-                    else 100.0
-                )
-                acc_pct = (
-                    self.accel_percent if self.accel_percent is not None else 100.0
-                )
+                vel_pct = self.p.speed_pct if self.p.speed_pct > 0.0 else 100.0
+                acc_pct = self.p.accel_pct
                 cse.set_limits(vel_pct, acc_pct)
                 cse.set_pose_target(self.target_pose)
                 self._streaming_initialized = True
@@ -318,20 +305,16 @@ class CartesianMoveCommandBase(TrajectoryMoveCommandBase):
         return super().execute_step(state)
 
 
-@register_command("CARTJOG")
+@register_command(CmdType.CARTJOG)
 class CartesianJogCommand(MotionCommand):
     """
     A non-blocking command to jog the robot's end-effector in Cartesian space.
     """
 
+    PARAMS_TYPE = CartJogCmd
     streamable = True
 
     __slots__ = (
-        "frame",
-        "axis",
-        "speed_percentage",
-        "accel_percent",
-        "duration",
         "axis_vectors",
         "is_rotation",
         "_ik_stopping",
@@ -355,11 +338,6 @@ class CartesianJogCommand(MotionCommand):
 
     def __init__(self):
         super().__init__()
-        self.frame = None
-        self.axis = None
-        self.speed_percentage: float = 50.0
-        self.accel_percent: float = 100.0
-        self.duration: float = 1.5
         self.axis_vectors = None
         self.is_rotation = False
         self._ik_stopping = False
@@ -367,7 +345,6 @@ class CartesianJogCommand(MotionCommand):
         self._axis_index = 0
         self._axis_sign = 1.0
 
-        # Pre-allocate buffers once (reused across streaming updates)
         self._world_twist_buf = np.zeros(6, dtype=np.float64)
         self._vel_lin_buf = np.zeros(3, dtype=np.float64)
         self._vel_ang_buf = np.zeros(3, dtype=np.float64)
@@ -377,52 +354,24 @@ class CartesianJogCommand(MotionCommand):
         self._R_ws = np.zeros((3, 3), dtype=np.float64)
         self._V_ws = np.zeros((3, 3), dtype=np.float64)
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse CARTJOG command parameters.
-
-        Format: CARTJOG|frame|axis|speed_pct|duration[|accel_pct]
-        Example: CARTJOG|WRF|+X|50|2.0 or CARTJOG|WRF|+X|50|2.0|80
-        """
-        if len(parts) < 5 or len(parts) > 6:
-            return (
-                False,
-                "CARTJOG requires 4-5 parameters: frame, axis, speed, duration[, accel]",
-            )
-
-        self.frame = parts[1].upper()
-        self.axis = parts[2]
-        self.speed_percentage = float(parts[3])
-        self.duration = float(parts[4])
-        if len(parts) == 6:
-            self.accel_percent = float(parts[5])
-
-        if self.frame not in ["WRF", "TRF"]:
-            return (False, f"Invalid frame: {self.frame}. Must be WRF or TRF")
-
-        if self.axis not in AXIS_MAP:
-            return (False, f"Invalid axis: {self.axis}")
-
-        self.axis_vectors = AXIS_MAP[self.axis]
-        self.is_rotation = any(self.axis_vectors[1])
-
-        self.is_valid = True
-        return (True, None)
-
     def do_setup(self, state: "ControllerState") -> None:
         """Set the end time when the command actually starts."""
-        self.start_timer(float(self.duration))
+        assert self.p is not None
+
+        # Axis is validated by struct pattern constraint, but we still need to look it up
+        axis_key = self.p.axis
+        self.axis_vectors = AXIS_MAP[axis_key]
+        self.is_rotation = any(self.axis_vectors[1])
+
+        self.start_timer(self.p.duration)
         self._jog_initialized = False
         self._ik_stopping = False
 
-        # Parse axis index and sign from axis_vectors
-        # axis_vectors is ([x,y,z], [rx,ry,rz]) where exactly one component is ±1
         if self.is_rotation:
-            vec = self.axis_vectors[1]  # Rotation vector
+            vec = self.axis_vectors[1]
         else:
-            vec = self.axis_vectors[0]  # Linear vector
+            vec = self.axis_vectors[0]
 
-        # Find which axis (0=X, 1=Y, 2=Z)
         for i, v in enumerate(vec):
             if v != 0:
                 self._axis_index = i
@@ -432,16 +381,13 @@ class CartesianJogCommand(MotionCommand):
     def _compute_target_pose_from_velocity(
         self, state: "ControllerState", smoothed_vel: np.ndarray
     ) -> None:
-        """Compute target pose from smoothed velocity, storing result in _target_pose_buf.
-
-        For WRF: transforms body-frame velocity to world-frame and left-multiplies.
-        For TRF: uses body-frame velocity directly and right-multiplies.
-        """
+        """Compute target pose from smoothed velocity."""
+        assert self.p is not None
         cse = state.cartesian_streaming_executor
         assert cse is not None
         current_pose = get_fkine_se3(state)
 
-        if self.frame == "WRF":
+        if self.p.frame == "WRF":
             # WRF: transform velocity to world frame and left-multiply
             assert cse.reference_pose is not None
             R = cse.reference_pose[:3, :3]
@@ -465,7 +411,7 @@ class CartesianJogCommand(MotionCommand):
                 smoothed_vel,
                 cse.dt,
                 current_pose,
-                self._world_twist_buf,  # reuse as body_twist buffer
+                self._world_twist_buf,
                 self._delta_se3_buf,
                 self._target_pose_buf,
                 self._omega_ws,
@@ -474,15 +420,9 @@ class CartesianJogCommand(MotionCommand):
             )
 
     def execute_step(self, state: "ControllerState") -> ExecutionStatus:
-        """Execute one tick of Cartesian jogging using Cartesian-space Ruckig.
+        """Execute one tick of Cartesian jogging."""
+        assert self.p is not None
 
-        Unlike JogCommand which has a velocity-based fallback when streaming
-        is unavailable, CartesianJogCommand requires CartesianStreamingExecutor
-        because:
-        1. Cartesian jogging needs smooth interpolation in SE3 space
-        2. Each tick requires IK solve (Cartesian pose → joint positions)
-        3. No direct "Cartesian velocity" command exists at the motor level
-        """
         cse = state.cartesian_streaming_executor
         if cse is None:
             logger.warning("[CARTJOG] No cartesian_streaming_executor available")
@@ -494,7 +434,7 @@ class CartesianJogCommand(MotionCommand):
         # Initialize only if not already active (preserve velocity across streaming)
         if not cse.active:
             cse.sync_pose(get_fkine_se3(state))
-            cse.set_limits(100.0, self.accel_percent)
+            cse.set_limits(100.0, self.p.accel_pct)
 
         # Handle timer expiry - stop smoothly
         if self.timer_expired():
@@ -519,18 +459,16 @@ class CartesianJogCommand(MotionCommand):
         if self.is_rotation:
             cart_ang_max = np.rad2deg(LIMITS.cart.jog.velocity.angular)
             vel_deg_s = self.linmap_pct(
-                self.speed_percentage, CART_ANG_JOG_MIN, cart_ang_max
+                self.p.speed_pct, CART_ANG_JOG_MIN, cart_ang_max
             )
             velocity = np.radians(vel_deg_s) * self._axis_sign
         else:
-            cart_lin_max = LIMITS.cart.jog.velocity.linear * 1000  # m/s → mm/s
-            vel_mm_s = self.linmap_pct(
-                self.speed_percentage, CART_LIN_JOG_MIN, cart_lin_max
-            )
+            cart_lin_max = LIMITS.cart.jog.velocity.linear * 1000
+            vel_mm_s = self.linmap_pct(self.p.speed_pct, CART_LIN_JOG_MIN, cart_lin_max)
             velocity = (vel_mm_s / 1000.0) * self._axis_sign
 
         # Set target velocity (WRF transforms to body frame, TRF uses body directly)
-        if self.frame == "WRF":
+        if self.p.frame == "WRF":
             cse.set_jog_velocity_1dof_wrf(self._axis_index, velocity, self.is_rotation)
         else:
             cse.set_jog_velocity_1dof(self._axis_index, velocity, self.is_rotation)
@@ -569,7 +507,7 @@ class CartesianJogCommand(MotionCommand):
             cse.sync_pose(get_fkine_se3(state))
             self._ik_stopping = False
             # Re-apply the jog velocity to resume motion
-            if self.frame == "WRF":
+            if self.p.frame == "WRF":
                 cse.set_jog_velocity_1dof_wrf(
                     self._axis_index, velocity, self.is_rotation
                 )
@@ -582,50 +520,21 @@ class CartesianJogCommand(MotionCommand):
         return ExecutionStatus.executing("CARTJOG")
 
 
-@register_command("MOVECART")
+@register_command(CmdType.MOVECART)
 class MoveCartCommand(CartesianMoveCommandBase):
     """Move the robot's end-effector in a straight line to an absolute Cartesian pose."""
 
-    __slots__ = ("pose",)
+    PARAMS_TYPE = MoveCartCmd
+
+    __slots__ = ()
 
     def __init__(self):
         super().__init__()
-        self.pose: list[float] | None = None
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse MOVECART command parameters.
-
-        Format: MOVECART|x|y|z|rx|ry|rz|duration|speed|accel
-        Example: MOVECART|100|200|300|0|0|0|2.0|None|50
-        """
-        if len(parts) != 10:
-            return (
-                False,
-                "MOVECART requires 9 parameters: x, y, z, rx, ry, rz, duration, speed, accel",
-            )
-
-        self.pose = [float(parts[i]) for i in range(1, 7)]
-        self.duration = parse_opt_float(parts[7])
-        self.velocity_percent = parse_opt_float(parts[8])
-        self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
-
-        if self.duration is None and self.velocity_percent is None:
-            return (False, "MOVECART requires either duration or velocity_percent")
-
-        if self.duration is not None and self.velocity_percent is not None:
-            logger.info(
-                "  -> INFO: Both duration and velocity_percent provided. Using duration."
-            )
-            self.velocity_percent = None
-
-        self.log_debug("Parsed MoveCart: %s, accel=%s%%", self.pose, self.accel_percent)
-        self.is_valid = True
-        return (True, None)
 
     def _compute_target_pose(self, state: "ControllerState") -> None:
         """Compute absolute target pose from parsed coordinates."""
-        pose = cast(list[float], self.pose)
+        assert self.p is not None
+        pose = self.p.pose
         self.target_pose = np.zeros((4, 4), dtype=np.float64)
         se3_from_rpy(
             pose[0] / 1000.0,
@@ -638,57 +547,21 @@ class MoveCartCommand(CartesianMoveCommandBase):
         )
 
 
-@register_command("MOVECARTRELTRF")
+@register_command(CmdType.MOVECARTRELTRF)
 class MoveCartRelTrfCommand(CartesianMoveCommandBase):
     """Move the robot's end-effector relative to current position in Tool Reference Frame."""
 
-    __slots__ = ("deltas",)
+    PARAMS_TYPE = MoveCartRelTrfCmd
+
+    __slots__ = ()
 
     def __init__(self):
         super().__init__()
-        self.deltas: list[float] | None = None
-
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse MOVECARTRELTRF command parameters.
-
-        Format: MOVECARTRELTRF|dx|dy|dz|rx|ry|rz|duration|speed|accel
-        Example: MOVECARTRELTRF|10|0|0|0|0|0|NONE|50|100
-        """
-        if len(parts) != 10:
-            return (
-                False,
-                "MOVECARTRELTRF requires 9 parameters: dx, dy, dz, rx, ry, rz, duration, speed, accel",
-            )
-
-        self.deltas = [float(parts[i]) for i in range(1, 7)]
-        self.duration = parse_opt_float(parts[7])
-        self.velocity_percent = parse_opt_float(parts[8])
-        self.accel_percent = parse_opt_float(parts[9], DEFAULT_ACCEL_PERCENT)
-
-        if self.duration is None and self.velocity_percent is None:
-            return (
-                False,
-                "MOVECARTRELTRF requires either duration or velocity_percent",
-            )
-
-        if self.duration is not None and self.velocity_percent is not None:
-            logger.info(
-                "  -> INFO: Both duration and velocity_percent provided. Using duration."
-            )
-            self.velocity_percent = None
-
-        self.log_debug(
-            "Parsed MoveCartRelTrf: deltas=%s, accel=%s%%",
-            self.deltas,
-            self.accel_percent,
-        )
-        self.is_valid = True
-        return (True, None)
 
     def _compute_target_pose(self, state: "ControllerState") -> None:
         """Compute target pose from current pose + TRF delta."""
-        deltas = cast(list[float], self.deltas)
+        assert self.p is not None
+        deltas = self.p.deltas
         delta_se3 = np.zeros((4, 4), dtype=np.float64)
         se3_from_rpy(
             deltas[0] / 1000.0,

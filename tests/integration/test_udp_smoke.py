@@ -4,6 +4,7 @@ Covers PING/PONG, GET_* endpoints, STOP semantics, and basic functionality.
 """
 
 import os
+import socket
 import sys
 
 import pytest
@@ -85,15 +86,17 @@ class TestGetEndpoints:
 
     def test_get_status_aggregate(self, client, server_proc):
         """Test GET_STATUS aggregate command."""
+        from parol6.protocol.wire import StatusResultStruct
+
         status = client.get_status()
         assert status is not None
-        assert isinstance(status, dict)
+        assert isinstance(status, StatusResultStruct)
 
-        # Should contain all status components
-        assert "pose" in status
-        assert "angles" in status
-        assert "io" in status
-        assert "gripper" in status
+        # Should contain all status components (as struct attributes)
+        assert hasattr(status, "pose")
+        assert hasattr(status, "angles")
+        assert hasattr(status, "io")
+        assert hasattr(status, "gripper")
 
 
 @pytest.mark.integration
@@ -187,27 +190,26 @@ class TestErrorHandling:
     """Test error handling and edge cases."""
 
     def test_invalid_command_format(self, server_proc, ports):
-        """Test server response to invalid commands."""
-        client = RobotClient(ports.server_ip, ports.server_port)
+        """Test server response to invalid binary msgpack commands."""
+        from parol6.protocol.wire import MsgType, encode, decode
 
-        # Send malformed command and consume server error response
-        reply = client.send_raw(
-            "INVALID_COMMAND|BAD|PARAMS", await_reply=True, timeout=1.0
-        )
-        assert isinstance(reply, str) and reply.startswith("ERROR|")
+        # Send invalid command via raw socket with binary msgpack
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(2.0)
+            # Send an array with invalid command type (9999 is not a valid CmdType)
+            msg = encode([9999, "invalid_param"])
+            sock.sendto(msg, (ports.server_ip, ports.server_port))
+
+            # Expect error response in array format: [MsgType.ERROR, message]
+            data, _ = sock.recvfrom(1024)
+            resp = decode(data)
+            assert isinstance(resp, (list, tuple))
+            assert resp[0] == MsgType.ERROR
+            # msgspec validation produces "Invalid value 9999" error
+            assert "9999" in resp[1] or "Invalid" in resp[1] or "Unknown" in resp[1]
 
         # Server should remain responsive after handling the error
-        assert client.ping() is not None
-
-    def test_empty_command(self, server_proc, ports):
-        """Test server response to empty commands."""
         client = RobotClient(ports.server_ip, ports.server_port)
-
-        # Send empty command (fire-and-forget)
-        sent = client.send_raw("")
-        assert sent is True
-
-        # Server should remain responsive
         assert client.ping() is not None
 
     def test_rapid_command_sequence(self, server_proc, ports):

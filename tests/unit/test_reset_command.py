@@ -1,28 +1,30 @@
 """Tests for RESET command."""
 
-import pytest
-from parol6.commands.utility_commands import ResetCommand
-from parol6.server.state import ControllerState
 import numpy as np
+import pytest
+
+from parol6.commands.utility_commands import ResetCommand
+from parol6.protocol.wire import ResetCmd
+from parol6.server.state import ControllerState
 
 
 class TestResetCommandParsing:
-    """Test ResetCommand.do_match parsing."""
+    """Test ResetCommand initialization."""
 
-    def test_parse_no_params(self):
+    def test_init(self):
         """RESET takes no parameters."""
         cmd = ResetCommand()
-        ok, err = cmd.do_match(["RESET"])
-        assert ok is True
-        assert err is None
-        assert cmd.is_valid is True
+        # Assign the empty params struct
+        cmd.assign_params(ResetCmd())
 
-    def test_parse_with_params_fails(self):
-        """RESET should reject extra parameters."""
-        cmd = ResetCommand()
-        ok, err = cmd.do_match(["RESET", "extra"])
-        assert ok is False
-        assert "no parameters" in err
+        assert cmd.is_valid is True
+        assert cmd.p is not None
+
+    def test_struct_has_no_params(self):
+        """ResetCmd struct should have no fields."""
+        params = ResetCmd()
+        # Struct should be valid with no fields
+        assert params is not None
 
 
 class TestResetCommandExecution:
@@ -37,8 +39,8 @@ class TestResetCommandExecution:
         state.Speed_in = np.array([10, 20, 30, 40, 50, 60], dtype=np.int32)
 
         cmd = ResetCommand()
-        cmd.do_match(["RESET"])
-        cmd.tick(state)  # Reset executes in tick, not setup
+        cmd.assign_params(ResetCmd())
+        cmd.tick(state)  # Reset executes in tick
 
         assert np.all(state.Position_in == 0)
         assert np.all(state.Speed_in == 0)
@@ -51,8 +53,8 @@ class TestResetCommandExecution:
         state.disabled_reason = "some error"
 
         cmd = ResetCommand()
-        cmd.do_match(["RESET"])
-        cmd.tick(state)  # Reset executes in tick, not setup
+        cmd.assign_params(ResetCmd())
+        cmd.tick(state)
 
         assert state.e_stop_active is False
         assert state.soft_error is False
@@ -64,8 +66,8 @@ class TestResetCommandExecution:
         state._current_tool = "GRIPPER"
 
         cmd = ResetCommand()
-        cmd.do_match(["RESET"])
-        cmd.tick(state)  # Reset executes in tick, not setup
+        cmd.assign_params(ResetCmd())
+        cmd.tick(state)
 
         assert state._current_tool == "NONE"
 
@@ -77,8 +79,8 @@ class TestResetCommandExecution:
         state.incoming_command_buffer.append(("msg", ("addr", 123)))
 
         cmd = ResetCommand()
-        cmd.do_match(["RESET"])
-        cmd.tick(state)  # Reset executes in tick, not setup
+        cmd.assign_params(ResetCmd())
+        cmd.tick(state)
 
         assert len(state.command_queue) == 0
         assert len(state.incoming_command_buffer) == 0
@@ -92,8 +94,8 @@ class TestResetCommandExecution:
         state.ser = "mock_serial"
 
         cmd = ResetCommand()
-        cmd.do_match(["RESET"])
-        cmd.tick(state)  # Reset executes in tick, not setup
+        cmd.assign_params(ResetCmd())
+        cmd.tick(state)
 
         assert state.ip == "192.168.1.100"
         assert state.port == 9999
@@ -104,8 +106,8 @@ class TestResetCommandExecution:
         """Reset command should complete in single tick."""
         state = ControllerState()
         cmd = ResetCommand()
-        cmd.do_match(["RESET"])
-        cmd.tick(state)  # Reset completes in single tick
+        cmd.assign_params(ResetCmd())
+        cmd.tick(state)
 
         assert cmd.is_finished is True
 

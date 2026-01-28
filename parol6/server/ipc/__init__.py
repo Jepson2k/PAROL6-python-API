@@ -24,6 +24,7 @@ from .shared_memory_types import (
     unpack_ik_request,
     pack_ik_response,
     unpack_ik_response,
+    unpack_ik_response_into,
     # Utilities
     create_shm,
     attach_shm,
@@ -49,6 +50,7 @@ __all__ = [
     "unpack_ik_request",
     "pack_ik_response",
     "unpack_ik_response",
+    "unpack_ik_response_into",
     # Utilities
     "create_shm",
     "attach_shm",

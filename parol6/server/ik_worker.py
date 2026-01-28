@@ -127,12 +127,12 @@ def ik_enablement_worker_main(
         # Release memoryviews before closing shared memory to avoid BufferError
         try:
             input_mv.release()
-        except Exception:
-            pass
+        except BufferError:
+            pass  # Already released or not releasable
         try:
             output_mv.release()
-        except Exception:
-            pass
+        except BufferError:
+            pass  # Already released or not releasable
         input_shm.close()
         output_shm.close()
         logger.info("IK worker subprocess exiting")

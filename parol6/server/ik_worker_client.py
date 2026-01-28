@@ -19,7 +19,7 @@ from parol6.server.ipc import (
     cleanup_shm,
     create_shm,
     pack_ik_request,
-    unpack_ik_response,
+    unpack_ik_response_into,
 )
 from parol6.server.ik_worker import ik_enablement_worker_main
 
@@ -40,6 +40,7 @@ class IKWorkerClient:
         self._output_shm = None
         self._input_mv: memoryview | None = None
         self._output_mv: memoryview | None = None
+        self._output_arr: np.ndarray | None = None  # numpy view for numba
         self._process: Process | None = None
         self._shutdown_event: Event | None = None
         self._request_event: Event | None = None
@@ -50,7 +51,7 @@ class IKWorkerClient:
         # Unique names for shared memory segments
         self._shm_suffix = f"_{id(self)}"
 
-        # Cached results
+        # Pre-allocated result buffers (zero-alloc reads)
         self._joint_en = np.ones(12, dtype=np.uint8)
         self._cart_en_wrf = np.ones(12, dtype=np.uint8)
         self._cart_en_trf = np.ones(12, dtype=np.uint8)
@@ -75,6 +76,7 @@ class IKWorkerClient:
             self._output_shm = create_shm(output_name, IK_OUTPUT_SHM_SIZE)
             self._input_mv = memoryview(self._input_shm.buf)
             self._output_mv = memoryview(self._output_shm.buf)
+            self._output_arr = np.frombuffer(self._output_shm.buf, dtype=np.uint8)
 
             # Initialize with zeros (use numpy for cross-platform compatibility)
             np.frombuffer(self._input_shm.buf, dtype=np.uint8)[:] = 0
@@ -146,13 +148,13 @@ class IKWorkerClient:
         try:
             if self._input_mv is not None:
                 self._input_mv.release()
-        except Exception:
-            pass
+        except BufferError:
+            pass  # Already released or not releasable
         try:
             if self._output_mv is not None:
                 self._output_mv.release()
-        except Exception:
-            pass
+        except BufferError:
+            pass  # Already released or not releasable
         self._input_mv = None
         self._output_mv = None
 
@@ -186,42 +188,42 @@ class IKWorkerClient:
         pack_ik_request(self._input_mv, q_rad, T_matrix)
         self._request_event.set()  # Wake up worker immediately
 
-    def get_results_if_ready(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    def get_results_if_ready(self) -> bool:
         """
-        Check for and return results (non-blocking).
+        Check for and update cached results if new data available (non-blocking, zero-alloc).
 
         Returns:
-            Tuple of (joint_en, cart_en_wrf, cart_en_trf) if new results available,
-            None otherwise.
+            True if new results were copied into the cached buffers, False otherwise.
+            Access results via joint_en, cart_en_wrf, cart_en_trf properties.
         """
-        if self._output_mv is None:
-            return None
+        if self._output_arr is None:
+            return False
 
-        joint_en, cart_en_wrf, cart_en_trf, version = unpack_ik_response(
-            self._output_mv
+        new_version = unpack_ik_response_into(
+            self._output_arr,
+            self._last_resp_version,
+            self._joint_en,
+            self._cart_en_wrf,
+            self._cart_en_trf,
         )
 
-        if version != self._last_resp_version and version > 0:
-            self._last_resp_version = version
+        if new_version > 0:
+            self._last_resp_version = new_version
+            return True
 
-            # Cache results
-            self._joint_en = joint_en
-            self._cart_en_wrf = cart_en_wrf
-            self._cart_en_trf = cart_en_trf
+        return False
 
-            return (joint_en, cart_en_wrf, cart_en_trf)
+    @property
+    def joint_en(self) -> np.ndarray:
+        """Joint enablement flags (12 elements)."""
+        return self._joint_en
 
-        return None
+    @property
+    def cart_en_wrf(self) -> np.ndarray:
+        """Cartesian enablement flags in world reference frame (12 elements)."""
+        return self._cart_en_wrf
 
-    def get_cached_results(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Get the most recent cached results.
-
-        Returns:
-            Tuple of (joint_en, cart_en_wrf, cart_en_trf)
-        """
-        return (
-            self._joint_en.copy(),
-            self._cart_en_wrf.copy(),
-            self._cart_en_trf.copy(),
-        )
+    @property
+    def cart_en_trf(self) -> np.ndarray:
+        """Cartesian enablement flags in tool reference frame (12 elements)."""
+        return self._cart_en_trf

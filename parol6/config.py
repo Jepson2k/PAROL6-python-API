@@ -20,6 +20,13 @@ if TYPE_CHECKING:
 
 TRACE: int = 5
 logging.addLevelName(TRACE, "TRACE")
+
+# Command queue limits
+MAX_COMMAND_QUEUE_SIZE: int = 100
+MAX_POLL_COUNT: int = 25  # Max UDP messages to read per control tick
+
+# Serial transport defaults
+SERIAL_RX_RING_DEFAULT: int = 262144
 # Add Logger.trace if missing
 if not hasattr(logging.Logger, "trace"):
 

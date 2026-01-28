@@ -17,6 +17,21 @@ from ._version import __version__
 from .client.async_client import AsyncRobotClient
 from .client.manager import ServerManager, is_server_running, manage_server
 from .client.sync_client import RobotClient
+from .protocol.wire import (
+    CurrentActionResultStruct,
+    GcodeStatusResultStruct,
+    LoopStatsResultStruct,
+    StatusResultStruct,
+    ToolResultStruct,
+)
+from .protocol.types import PingResult
+
+# Type aliases for backward compatibility
+CurrentActionResult = CurrentActionResultStruct
+GcodeStatusResult = GcodeStatusResultStruct
+LoopStatsResult = LoopStatsResultStruct
+StatusResult = StatusResultStruct
+ToolResult = ToolResultStruct
 
 __all__ = [
     "__version__",
@@ -26,4 +41,18 @@ __all__ = [
     "manage_server",
     "is_server_running",
     "PAROL6_ROBOT",
+    # Result types (msgspec structs)
+    "CurrentActionResultStruct",
+    "GcodeStatusResultStruct",
+    "LoopStatsResultStruct",
+    "StatusResultStruct",
+    "ToolResultStruct",
+    # Backward-compatible aliases
+    "CurrentActionResult",
+    "GcodeStatusResult",
+    "LoopStatsResult",
+    "StatusResult",
+    "ToolResult",
+    # Other types
+    "PingResult",
 ]

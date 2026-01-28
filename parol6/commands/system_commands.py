@@ -11,8 +11,19 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-from parol6.commands.base import ExecutionStatus, SystemCommand, parse_bool, parse_int
+from parol6.commands.base import ExecutionStatus, SystemCommand
 from parol6.config import save_com_port
+from parol6.protocol.wire import (
+    CmdType,
+    DisableCmd,
+    EnableCmd,
+    SetIOCmd,
+    SetPortCmd,
+    SetProfileCmd,
+    SimulatorCmd,
+    StopCmd,
+    StreamCmd,
+)
 from parol6.protocol.wire import CommandCode
 from parol6.server.command_registry import register_command
 
@@ -22,19 +33,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@register_command("STOP")
+@register_command(CmdType.STOP)
 class StopCommand(SystemCommand):
     """Emergency stop command - immediately stops all motion."""
 
-    __slots__ = ()
+    PARAMS_TYPE = StopCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a STOP command."""
-        if parts[0].upper() == "STOP":
-            if len(parts) != 1:
-                return False, "STOP command takes no parameters"
-            return True, None
-        return False, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute stop - set all speeds to zero and command to IDLE."""
@@ -42,26 +47,17 @@ class StopCommand(SystemCommand):
         state.Speed_out.fill(0)
         state.Command_out = CommandCode.IDLE
 
-        # Clear any active commands in the controller
-        # This will be handled by the controller when it sees this command
-
         self.finish()
         return ExecutionStatus.completed("Robot stopped")
 
 
-@register_command("ENABLE")
+@register_command(CmdType.ENABLE)
 class EnableCommand(SystemCommand):
     """Enable the robot controller."""
 
-    __slots__ = ()
+    PARAMS_TYPE = EnableCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is an ENABLE command."""
-        if parts[0].upper() == "ENABLE":
-            if len(parts) != 1:
-                return False, "ENABLE command takes no parameters"
-            return True, None
-        return False, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute enable - set controller to enabled state."""
@@ -74,24 +70,18 @@ class EnableCommand(SystemCommand):
         return ExecutionStatus.completed("Controller enabled")
 
 
-@register_command("DISABLE")
+@register_command(CmdType.DISABLE)
 class DisableCommand(SystemCommand):
     """Disable the robot controller."""
 
-    __slots__ = ()
+    PARAMS_TYPE = DisableCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Check if this is a DISABLE command."""
-        if parts[0].upper() == "DISABLE":
-            if len(parts) != 1:
-                return False, "DISABLE command takes no parameters"
-            return True, None
-        return False, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute disable - zero speeds and set controller to disabled state."""
         logger.info("DISABLE command executed")
-        state.Speed_out.fill(0)  # Zero all speeds first
+        state.Speed_out.fill(0)
         state.enabled = False
         state.disabled_reason = "User requested disable"
         state.Command_out = CommandCode.DISABLE
@@ -100,93 +90,41 @@ class DisableCommand(SystemCommand):
         return ExecutionStatus.completed("Controller disabled")
 
 
-@register_command("SET_IO")
+@register_command(CmdType.SET_IO)
 class SetIOCommand(SystemCommand):
     """Set a digital I/O port state."""
 
-    __slots__ = ("port_index", "port_value")
+    PARAMS_TYPE = SetIOCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse SET_IO command.
-
-        Format: SET_IO|port_index|value
-        Example: SET_IO|0|1
-        """
-        if parts[0].upper() != "SET_IO":
-            return False, None
-
-        if len(parts) != 3:
-            return False, "SET_IO requires 2 parameters: port_index, value"
-
-        self.port_index = parse_int(parts[1])
-        self.port_value = parse_int(parts[2])
-
-        if self.port_index is None or self.port_value is None:
-            return False, "Port index and value must be integers"
-
-        # Validate port index (0-7 for 8 I/O ports)
-        if not 0 <= self.port_index <= 7:
-            return False, f"Port index must be 0-7, got {self.port_index}"
-
-        # Validate port value (0 or 1)
-        if self.port_value not in (0, 1):
-            return False, f"Port value must be 0 or 1, got {self.port_value}"
-
-        logger.info(f"Parsed SET_IO: port {self.port_index} = {self.port_value}")
-        return True, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute set port - update I/O port state."""
-        if self.port_index is None or self.port_value is None:
-            self.fail("Port index or value not set")
-            return ExecutionStatus.failed("Port parameters not set")
+        assert self.p is not None
 
-        logger.info(f"SET_IO: Setting port {self.port_index} to {self.port_value}")
+        logger.info(f"SET_IO: Setting port {self.p.port_index} to {self.p.value}")
 
-        # Update the output port state
-        state.InOut_out[self.port_index] = self.port_value
+        state.InOut_out[self.p.port_index] = self.p.value
 
         self.finish()
         return ExecutionStatus.completed(
-            f"Port {self.port_index} set to {self.port_value}"
+            f"Port {self.p.port_index} set to {self.p.value}"
         )
 
 
-@register_command("SET_PORT")
+@register_command(CmdType.SET_PORT)
 class SetSerialPortCommand(SystemCommand):
     """Set the serial COM port used by the controller."""
 
-    __slots__ = ("port_str",)
+    PARAMS_TYPE = SetPortCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse SET_PORT command.
-
-        Format: SET_PORT|serial_port
-        Example: SET_PORT|/dev/ttyACM0
-        """
-        if parts[0].upper() != "SET_PORT":
-            return False, None
-
-        if len(parts) != 2:
-            return False, "SET_PORT requires 1 parameter: serial_port"
-
-        port = (parts[1] or "").strip()
-        if not port:
-            return False, "Serial port cannot be empty"
-
-        self.port_str = port
-        logger.info(f"Parsed SET_PORT: serial_port={self.port_str}")
-        return True, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Persist the serial port selection; controller may reconnect based on this."""
-        if not self.port_str:
-            self.fail("No serial port provided")
-            return ExecutionStatus.failed("No serial port provided")
+        assert self.p is not None
 
-        ok = save_com_port(self.port_str)
+        ok = save_com_port(self.p.port_str)
         if not ok:
             self.fail("Failed to save COM port")
             return ExecutionStatus.failed("Failed to save COM port")
@@ -194,103 +132,52 @@ class SetSerialPortCommand(SystemCommand):
         self.finish()
         # Include details so the controller can reconnect immediately
         return ExecutionStatus.completed(
-            "Serial port saved", details={"serial_port": self.port_str}
+            "Serial port saved", details={"serial_port": self.p.port_str}
         )
 
 
-@register_command("STREAM")
+@register_command(CmdType.STREAM)
 class StreamCommand(SystemCommand):
     """Toggle stream mode for real-time jogging."""
 
-    __slots__ = ("stream_mode",)
+    PARAMS_TYPE = StreamCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse STREAM command.
-
-        Format: STREAM|on/off
-        Example: STREAM|on
-        """
-        if parts[0].upper() != "STREAM":
-            return False, None
-
-        if len(parts) != 2:
-            return False, "STREAM requires 1 parameter: on/off"
-
-        self.stream_mode = parse_bool(parts[1])
-        if parts[1].lower() not in ("on", "off", "1", "0", "true", "false"):
-            return False, f"STREAM mode must be 'on' or 'off', got '{parts[1]}'"
-
-        logger.info(f"Parsed STREAM: mode = {self.stream_mode}")
-        return True, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute stream mode toggle."""
-        if self.stream_mode is None:
-            self.fail("Stream mode not set")
-            return ExecutionStatus.failed("Stream mode not set")
-
+        assert self.p is not None
         # The controller will handle the actual stream mode setting
         # This is just a placeholder that sets a flag
-        logger.info(f"STREAM: Setting stream mode to {self.stream_mode}")
+        logger.info(f"STREAM: Setting stream mode to {self.p.on}")
 
-        state.stream_mode = self.stream_mode
+        state.stream_mode = self.p.on
 
         self.finish()
         return ExecutionStatus.completed(
-            f"Stream mode {'enabled' if self.stream_mode else 'disabled'}"
+            f"Stream mode {'enabled' if self.p.on else 'disabled'}"
         )
 
 
-@register_command("SIMULATOR")
+@register_command(CmdType.SIMULATOR)
 class SimulatorCommand(SystemCommand):
     """Toggle simulator (fake serial) mode on/off."""
 
-    __slots__ = ("mode_on",)
+    PARAMS_TYPE = SimulatorCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """
-        Parse SIMULATOR command.
-
-        Format: SIMULATOR|on/off
-        Example: SIMULATOR|on
-        """
-        if parts[0].upper() != "SIMULATOR":
-            return False, None
-
-        if len(parts) != 2:
-            return False, "SIMULATOR requires 1 parameter: on/off"
-
-        self.mode_on = parse_bool(parts[1])
-        if parts[1].lower() not in (
-            "on",
-            "off",
-            "1",
-            "0",
-            "true",
-            "false",
-            "yes",
-            "no",
-        ):
-            return False, "SIMULATOR parameter must be 'on' or 'off'"
-
-        logger.info(f"Parsed SIMULATOR: mode_on={self.mode_on}")
-        return True, None
+    __slots__ = ()
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute simulator toggle by setting env var and returning details to trigger reconfiguration."""
-        if self.mode_on is None:
-            self.fail("Simulator mode not set")
-            return ExecutionStatus.failed("Simulator mode not set")
+        assert self.p is not None
 
-        # Set environment variable used by transport factory
-        os.environ["PAROL6_FAKE_SERIAL"] = "1" if self.mode_on else "0"
-        logger.info(f"SIMULATOR command executed: {'ON' if self.mode_on else 'OFF'}")
+        os.environ["PAROL6_FAKE_SERIAL"] = "1" if self.p.on else "0"
+        logger.info(f"SIMULATOR command executed: {'ON' if self.p.on else 'OFF'}")
 
         self.finish()
         return ExecutionStatus.completed(
-            f"Simulator {'ON' if self.mode_on else 'OFF'}",
-            details={"simulator_mode": "on" if self.mode_on else "off"},
+            f"Simulator {'ON' if self.p.on else 'OFF'}",
+            details={"simulator_mode": "on" if self.p.on else "off"},
         )
 
 
@@ -298,12 +185,12 @@ class SimulatorCommand(SystemCommand):
 VALID_PROFILES = frozenset(("TOPPRA", "RUCKIG", "QUINTIC", "TRAPEZOID", "LINEAR"))
 
 
-@register_command("SETPROFILE")
+@register_command(CmdType.SET_PROFILE)
 class SetProfileCommand(SystemCommand):
     """
     Set the motion profile for all moves.
 
-    Format: SETPROFILE|<profile_type>
+    Format: [CmdType.SET_PROFILE, profile_type]
 
     Profile Types:
         TOPPRA    - Time-optimal path parameterization (default)
@@ -316,42 +203,33 @@ class SetProfileCommand(SystemCommand):
     Cartesian moves will use TOPPRA when RUCKIG is set.
     """
 
-    __slots__ = ("profile",)
+    PARAMS_TYPE = SetProfileCmd
 
-    def do_match(self, parts: list[str]) -> tuple[bool, str | None]:
-        """Parse SETPROFILE command."""
-        if parts[0].upper() != "SETPROFILE":
-            return False, None
+    __slots__ = ()
 
-        if len(parts) != 2:
-            return False, "SETPROFILE requires 1 parameter: profile_type"
-
-        profile = parts[1].upper()
+    def do_setup(self, state: ControllerState) -> None:
+        """Validate profile name against VALID_PROFILES."""
+        assert self.p is not None
+        profile = self.p.profile.upper()
         if profile not in VALID_PROFILES:
             valid_list = ", ".join(sorted(VALID_PROFILES))
-            return (
-                False,
-                f"Invalid profile '{parts[1]}'. Valid profiles: {valid_list}",
+            raise ValueError(
+                f"Invalid profile '{self.p.profile}'. Valid profiles: {valid_list}"
             )
-
-        self.profile = profile
-        logger.info(f"Parsed SETPROFILE: profile={self.profile}")
-        return True, None
 
     def execute_step(self, state: ControllerState) -> ExecutionStatus:
         """Execute profile change."""
-        if not hasattr(self, "profile") or self.profile is None:
-            self.fail("Profile not set")
-            return ExecutionStatus.failed("Profile not set")
+        assert self.p is not None
+        profile = self.p.profile.upper()
 
         old_profile = state.motion_profile
-        state.motion_profile = self.profile
+        state.motion_profile = profile
         logger.info(
-            f"SETPROFILE: Changed motion profile from {old_profile} to {self.profile}"
+            f"SETPROFILE: Changed motion profile from {old_profile} to {profile}"
         )
 
         self.finish()
         return ExecutionStatus.completed(
-            f"Motion profile set to {self.profile}",
-            details={"profile": self.profile, "previous": old_profile},
+            f"Motion profile set to {profile}",
+            details={"profile": profile, "previous": old_profile},
         )

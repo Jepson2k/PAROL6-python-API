@@ -5,43 +5,44 @@ Tests GET_CURRENT_ACTION and GET_QUEUE query commands without requiring a runnin
 Uses stub UDP transport and minimal state objects to test command logic in isolation.
 """
 
-import json
 from types import SimpleNamespace
 
-from parol6.commands.base import CommandContext
+from parol6.commands.base import CommandContext, ExecutionStatusCode
 from parol6.commands.query_commands import GetCurrentActionCommand, GetQueueCommand
+from parol6.protocol.wire import MsgType, QueryType, decode
 
 
 class StubUDPTransport:
     """Stub UDP transport that captures sent responses."""
 
     def __init__(self):
-        self.sent = []
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
 
-    def send_response(self, message: str, addr: tuple):
-        """Capture sent responses for verification."""
-        self.sent.append((message, addr))
+    def send(self, data: bytes, addr: tuple[str, int]) -> bool:
+        """Capture sent binary responses for verification."""
+        self.sent.append((data, addr))
+        return True
+
+    def get_last_response(self) -> tuple | list | None:
+        """Decode and return the last sent response."""
+        if not self.sent:
+            return None
+        data, _ = self.sent[-1]
+        return decode(data)
 
 
-def test_get_current_action_command_match():
-    """Test that GET_CURRENT_ACTION command matches correctly."""
+def test_get_current_action_command_init():
+    """Test that GET_CURRENT_ACTION command initializes correctly."""
     cmd = GetCurrentActionCommand()
 
-    # Should match
-    can_handle, error = cmd.do_match(["GET_CURRENT_ACTION"])
-    assert can_handle
-    assert error is None
-
-    # Should not match other commands
-    can_handle, error = cmd.do_match(["GET_QUEUE"])
-    assert not can_handle
-
-    can_handle, error = cmd.do_match(["UNKNOWN"])
-    assert not can_handle
+    # Command should initialize with valid state
+    assert cmd.is_valid
+    assert not cmd.is_finished
+    assert cmd.PARAMS_TYPE is not None
 
 
 def test_get_current_action_replies_json():
-    """Test that GET_CURRENT_ACTION returns correct JSON response."""
+    """Test that GET_CURRENT_ACTION returns correct binary response."""
     # Setup
     udp = StubUDPTransport()
     ctx = CommandContext(
@@ -63,21 +64,20 @@ def test_get_current_action_replies_json():
 
     # Verify response sent
     assert len(udp.sent) == 1
-    message, addr = udp.sent[0]
+    msg = udp.get_last_response()
 
-    # Verify message format
-    assert message.startswith("ACTION|")
+    # Verify binary array message format: [RESPONSE, query_type, value]
+    assert msg[0] == MsgType.RESPONSE
+    assert msg[1] == QueryType.CURRENT_ACTION
+    # payload is [current, state, next]
+    current, state, next_ = msg[2]
 
-    # Parse and verify JSON payload
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    assert payload["current"] == "MovePoseCommand"
-    assert payload["state"] == "EXECUTING"
-    assert payload["next"] == "HomeCommand"
+    assert current == "MovePoseCommand"
+    assert state == "EXECUTING"
+    assert next_ == "HomeCommand"
 
     # Verify command completed
-    assert status.code.value == "COMPLETED"
+    assert status.code == ExecutionStatusCode.COMPLETED
     assert cmd.is_finished
 
 
@@ -98,31 +98,27 @@ def test_get_current_action_with_idle_state():
 
     # Verify response
     assert len(udp.sent) == 1
-    message, _ = udp.sent[0]
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
+    msg = udp.get_last_response()
+    # payload is [current, state, next]
+    current, state, next_ = msg[2]
 
-    assert payload["current"] == ""
-    assert payload["state"] == "IDLE"
-    assert payload["next"] == ""
+    assert current == ""
+    assert state == "IDLE"
+    assert next_ == ""
 
 
-def test_get_queue_command_match():
-    """Test that GET_QUEUE command matches correctly."""
+def test_get_queue_command_init():
+    """Test that GET_QUEUE command initializes correctly."""
     cmd = GetQueueCommand()
 
-    # Should match
-    can_handle, error = cmd.do_match(["GET_QUEUE"])
-    assert can_handle
-    assert error is None
-
-    # Should not match other commands
-    can_handle, error = cmd.do_match(["GET_CURRENT_ACTION"])
-    assert not can_handle
+    # Command should initialize with valid state
+    assert cmd.is_valid
+    assert not cmd.is_finished
+    assert cmd.PARAMS_TYPE is not None
 
 
 def test_get_queue_replies_json():
-    """Test that GET_QUEUE returns correct JSON response."""
+    """Test that GET_QUEUE returns correct binary response."""
     # Setup
     udp = StubUDPTransport()
     ctx = CommandContext(
@@ -142,24 +138,22 @@ def test_get_queue_replies_json():
 
     # Verify response sent
     assert len(udp.sent) == 1
-    message, addr = udp.sent[0]
+    msg = udp.get_last_response()
 
-    # Verify message format
-    assert message.startswith("QUEUE|")
+    # Verify binary array message format: [RESPONSE, query_type, value]
+    assert msg[0] == MsgType.RESPONSE
+    assert msg[1] == QueryType.QUEUE
+    # payload is just the queue list
+    payload = msg[2]
 
-    # Parse and verify JSON payload
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
-
-    assert payload["non_streamable"] == [
+    assert payload == [
         "MovePoseCommand",
         "HomeCommand",
         "MoveJointCommand",
     ]
-    assert payload["size"] == 3
 
     # Verify command completed
-    assert status.code.value == "COMPLETED"
+    assert status.code == ExecutionStatusCode.COMPLETED
     assert cmd.is_finished
 
 
@@ -180,12 +174,11 @@ def test_get_queue_with_empty_queue():
 
     # Verify response
     assert len(udp.sent) == 1
-    message, _ = udp.sent[0]
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
+    msg = udp.get_last_response()
+    # payload is just the queue list
+    payload = msg[2]
 
-    assert payload["non_streamable"] == []
-    assert payload["size"] == 0
+    assert payload == []
 
 
 def test_get_queue_excludes_streamable():
@@ -207,11 +200,11 @@ def test_get_queue_excludes_streamable():
     cmd.setup(state)
     cmd.tick(state)
 
-    message, _ = udp.sent[0]
-    json_str = message.split("|", 1)[1]
-    payload = json.loads(json_str)
+    msg = udp.get_last_response()
+    # payload is just the queue list
+    payload = msg[2]
 
     # Verify only non-streamable commands in response
-    assert "MovePoseCommand" in payload["non_streamable"]
-    assert "HomeCommand" in payload["non_streamable"]
-    assert payload["size"] == 2
+    assert "MovePoseCommand" in payload
+    assert "HomeCommand" in payload
+    assert len(payload) == 2

@@ -12,7 +12,11 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Literal, TypeVar
 
 from ..protocol.types import Axis, Frame, PingResult
-from ..protocol.wire import StatusBuffer
+from ..protocol.wire import (
+    CurrentActionResultStruct,
+    GcodeStatusResultStruct,
+    StatusBuffer,
+)
 from .async_client import AsyncRobotClient
 
 T = TypeVar("T")
@@ -51,7 +55,8 @@ def _stop_sync_loop() -> None:
         asyncio.run_coroutine_threadsafe(_shutdown(), loop)
         if _SYNC_THREAD is not None:
             _SYNC_THREAD.join(timeout=2.0)
-    except Exception:
+    except (RuntimeError, asyncio.InvalidStateError):
+        # Loop may already be stopped or thread may not be joinable
         pass
 
     _SYNC_LOOP = None
@@ -283,28 +288,28 @@ class RobotClient:
         """Alias for get_gripper_status()."""
         return _run(self._inner.get_gripper())
 
-    def get_status(self) -> dict | None:
+    def get_status(self):
         """Get aggregate robot status.
 
         Returns:
-            Dict with keys: pose, angles, io, gripper, or None on timeout.
+            StatusResultStruct with pose, angles, speeds, io, gripper, or None on timeout.
         """
         return _run(self._inner.get_status())
 
-    def get_loop_stats(self) -> dict | None:
+    def get_loop_stats(self):
         """Get control loop runtime statistics.
 
         Returns:
-            Dict with loop timing metrics, or None on timeout.
+            LoopStatsResultStruct with loop timing metrics, or None on timeout.
         """
         return _run(self._inner.get_loop_stats())
 
-    def get_tool(self) -> dict | None:
+    def get_tool(self):
         """
         Get the current tool configuration and available tools.
 
         Returns:
-            Dict with keys: 'tool' (current tool name), 'available' (list of available tools)
+            ToolResultStruct with tool (current) and available (list), or None.
         """
         return _run(self._inner.get_tool())
 
@@ -342,22 +347,21 @@ class RobotClient:
         """
         return _run(self._inner.get_profile())
 
-    def get_current_action(self) -> dict | None:
+    def get_current_action(self) -> CurrentActionResultStruct | None:
         """
         Get the current executing action/command and its state.
 
         Returns:
-            Dict with keys: 'current' (current action name), 'state' (action state),
-                           'next' (next action if any)
+            Struct with current action name, state, and next action.
         """
         return _run(self._inner.get_current_action())
 
-    def get_queue(self) -> dict | None:
+    def get_queue(self) -> list[str] | None:
         """
         Get the list of queued non-streamable commands.
 
         Returns:
-            Dict with keys: 'non_streamable' (list of queued commands), 'size' (queue size)
+            List of queued command names.
         """
         return _run(self._inner.get_queue())
 
@@ -443,17 +447,6 @@ class RobotClient:
         Note: predicate is executed in the client's event loop thread.
         """
         return _run(self._inner.wait_for_status(predicate, timeout=timeout))
-
-    def send_raw(
-        self, message: str, await_reply: bool = False, timeout: float = 2.0
-    ) -> bool | str | None:
-        """
-        Send a raw UDP message; optionally await a single reply and return its text.
-        Returns True on fire-and-forget send, str on reply, or None on timeout/error when awaiting.
-        """
-        return _run(
-            self._inner.send_raw(message, await_reply=await_reply, timeout=timeout)
-        )
 
     # ---------- extended controls / motion ----------
 
@@ -562,8 +555,6 @@ class RobotClient:
         duration: float | None = None,
         speed: float | None = None,
         accel: int | None = None,
-        profile: str | None = None,
-        tracking: str | None = None,
         wait: bool = False,
         **wait_kwargs,
     ) -> bool:
@@ -574,8 +565,6 @@ class RobotClient:
             duration: Time to complete motion in seconds.
             speed: Speed as percentage (1-100).
             accel: Acceleration as percentage (1-100).
-            profile: Motion profile type.
-            tracking: Tracking mode.
             wait: If True, block until motion completes.
             **wait_kwargs: Arguments passed to wait_motion_complete().
 
@@ -588,8 +577,6 @@ class RobotClient:
                 duration,
                 speed,
                 accel,
-                profile,
-                tracking,
                 wait=wait,
                 **wait_kwargs,
             )
@@ -599,8 +586,7 @@ class RobotClient:
         self,
         joint_index: int,
         speed: int,
-        duration: float | None = None,
-        distance_deg: float | None = None,
+        duration: float,
     ) -> bool:
         """Jog a single joint at a specified speed.
 
@@ -608,7 +594,6 @@ class RobotClient:
             joint_index: Joint to jog (0-5 positive, 6-11 negative direction).
             speed: Speed as percentage (1-100).
             duration: Time to jog in seconds.
-            distance_deg: Distance to jog in degrees.
 
         Returns:
             True if command sent successfully.
@@ -618,7 +603,6 @@ class RobotClient:
                 joint_index,
                 speed,
                 duration,
-                distance_deg,
             )
         )
 
@@ -766,11 +750,11 @@ class RobotClient:
         """
         return _run(self._inner.load_gcode_file(filepath))
 
-    def get_gcode_status(self) -> dict | None:
+    def get_gcode_status(self) -> GcodeStatusResultStruct | None:
         """Get the current status of the G-code interpreter.
 
         Returns:
-            Dict with interpreter state, or None on timeout.
+            Struct with interpreter state, or None on timeout.
         """
         return _run(self._inner.get_gcode_status())
 

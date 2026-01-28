@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -52,15 +52,19 @@ def _arrays_changed(
 
 @dataclass(slots=True)
 class TxCoalesceState:
-    """State for TX frame coalescing to avoid redundant writes."""
+    """State for TX frame coalescing to avoid redundant writes.
 
-    pos: np.ndarray
-    spd: np.ndarray
-    aff: np.ndarray
-    io: np.ndarray
-    grip: np.ndarray
-    cmd: int | None = None
-    tout: int | None = None
+    NOTE: Field types must match ControllerState output arrays and the dirty check
+    in write_frame_coalesced(). If TX frame format changes, update both places.
+    """
+
+    pos: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    spd: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    aff: np.ndarray = field(default_factory=lambda: np.zeros(8, dtype=np.uint8))
+    io: np.ndarray = field(default_factory=lambda: np.zeros(8, dtype=np.uint8))
+    grip: np.ndarray = field(default_factory=lambda: np.zeros(6, dtype=np.int32))
+    cmd: int = 0
+    tout: int = 0
     last_sent: float = 0.0
 
 
@@ -91,16 +95,10 @@ class TransportManager:
         self.transport: SerialTransport | MockSerialTransport | None = None
         self.first_frame_received = False
         self._last_version = 0
+        self._last_tx = TxCoalesceState()
 
-        # TX coalescing state
-        self._last_tx: TxCoalesceState | None = None
-
-    def initialize(self, state_arrays: dict[str, np.ndarray]) -> bool:
+    def initialize(self) -> bool:
         """Create and connect initial transport.
-
-        Args:
-            state_arrays: Dict with numpy arrays for TX coalescing initialization
-                         (keys: Position_out, Speed_out, Affected_joint_out, InOut_out, Gripper_data_out)
 
         Returns:
             True if transport was created (may not be connected yet).
@@ -111,18 +109,9 @@ class TransportManager:
                 persisted = get_com_port_with_fallback()
                 if persisted:
                     self.serial_port = persisted
-                    logger.info(f"Using persisted serial port: {persisted}")
+                    logger.info("Using persisted serial port: %s", persisted)
         except Exception as e:
-            logger.debug(f"Failed to load persisted COM port: {e}")
-
-        # Initialize TX coalescing state
-        self._last_tx = TxCoalesceState(
-            pos=np.empty_like(state_arrays["Position_out"]),
-            spd=np.empty_like(state_arrays["Speed_out"]),
-            aff=np.empty_like(state_arrays["Affected_joint_out"]),
-            io=np.empty_like(state_arrays["InOut_out"]),
-            grip=np.empty_like(state_arrays["Gripper_data_out"]),
-        )
+            logger.debug("Failed to load persisted COM port: %s", e)
 
         # Create transport
         if self.serial_port or is_simulation_mode():
@@ -198,7 +187,7 @@ class TransportManager:
                 logger.info("Serial switched to port %s", port)
                 return True
         except Exception as e:
-            logger.warning(f"Failed to (re)connect serial on SET_PORT: {e}")
+            logger.warning("Failed to (re)connect serial on SET_PORT: %s", e)
 
         return False
 
@@ -269,7 +258,7 @@ class TransportManager:
             return False, "Failed to create transport"
 
         except Exception as e:
-            logger.warning(f"Failed to (re)configure transport on SIMULATOR: {e}")
+            logger.warning("Failed to (re)configure transport on SIMULATOR: %s", e)
             return False, f"Transport switch failed: {e}"
 
     def get_latest_frame(self) -> tuple[memoryview | None, int, float]:
@@ -284,7 +273,7 @@ class TransportManager:
         try:
             return self.transport.get_latest_frame_view()
         except Exception as e:
-            logger.warning(f"Error getting latest frame: {e}")
+            logger.warning("Error getting latest frame: %s", e)
             return None, 0, 0.0
 
     def write_frame(
@@ -318,14 +307,11 @@ class TransportManager:
         if not self.transport or not self.transport.is_connected():
             return False
 
-        if self._last_tx is None:
-            return False
-
         # Check if state has changed or keepalive needed
         now = time.perf_counter()
         dirty = (
             (command_value != self._last_tx.cmd)
-            or (int(timeout_out) != int(self._last_tx.tout or 0))
+            or (int(timeout_out) != self._last_tx.tout)
             or _arrays_changed(
                 position_out,
                 self._last_tx.pos,
@@ -357,16 +343,16 @@ class TransportManager:
             if ok:
                 # Update last TX snapshot
                 self._last_tx.cmd = command_value
-                np.copyto(self._last_tx.pos, position_out)
-                np.copyto(self._last_tx.spd, speed_out)
-                np.copyto(self._last_tx.aff, affected_joint_out)
-                np.copyto(self._last_tx.io, inout_out)
+                self._last_tx.pos[:] = position_out
+                self._last_tx.spd[:] = speed_out
+                self._last_tx.aff[:] = affected_joint_out
+                self._last_tx.io[:] = inout_out
                 self._last_tx.tout = int(timeout_out)
-                np.copyto(self._last_tx.grip, gripper_data_out)
+                self._last_tx.grip[:] = gripper_data_out
                 self._last_tx.last_sent = now
             return ok
         except Exception as e:
-            logger.warning(f"Error writing frame: {e}")
+            logger.warning("Error writing frame: %s", e)
             return False
 
     def disconnect(self) -> None:
@@ -375,7 +361,7 @@ class TransportManager:
             try:
                 self.transport.disconnect()
             except Exception as e:
-                logger.debug(f"Error disconnecting transport: {e}")
+                logger.debug("Error disconnecting transport: %s", e)
             self.transport = None
 
     def sync_mock_from_state(self, state: Any) -> None:
@@ -401,8 +387,7 @@ class TransportManager:
 
     def _reset_tx_keepalive(self) -> None:
         """Reset TX keepalive to force prompt write."""
-        if self._last_tx is not None:
-            self._last_tx.last_sent = 0.0
+        self._last_tx.last_sent = 0.0
 
     def _wait_for_first_frame(self, timeout: float = 0.5) -> bool:
         """Wait for first frame with timeout.

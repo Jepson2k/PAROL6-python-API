@@ -1,8 +1,8 @@
 """
 UDP transport implementation for PAROL6 controller.
 
-This module handles UDP socket communication, message parsing, and
-response handling for the controller's network interface.
+This module handles UDP socket communication using binary msgpack protocol
+for the controller's network interface.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class UDPTransport:
         self._rx = bytearray(self.buffer_size)
         self._rxv = memoryview(self._rx)
         # Pre-allocated buffer for poll_receive_all (avoids list allocation per call)
-        self._recv_all_buf: list[tuple[str, tuple[str, int]]] = []
+        self._recv_all_buf: list[tuple[bytes, tuple[str, int]]] = []
 
     def create_socket(self) -> bool:
         """
@@ -107,18 +107,16 @@ class UDPTransport:
             finally:
                 self.socket = None
 
-    def poll_receive(self) -> tuple[str, tuple[str, int]] | None:
-        """Non-blocking receive. Returns None if no data available."""
+    def poll_receive(self) -> tuple[bytes, tuple[str, int]] | None:
+        """Non-blocking receive. Returns raw bytes and address, or None if no data."""
         if not self.socket or not self._running:
             return None
         try:
             nbytes, address = self.socket.recvfrom_into(self._rxv)
             if nbytes <= 0:
                 return None
-            message_str = self._rxv[:nbytes].tobytes().decode("ascii", errors="ignore")
-            if message_str.endswith(("\r", "\n")):
-                message_str = message_str.rstrip("\r\n")
-            return (message_str, address)
+            # Return raw bytes - let caller decode via msgspec
+            return (bytes(self._rxv[:nbytes]), address)
         except BlockingIOError:
             return None
         except OSError as e:
@@ -129,7 +127,7 @@ class UDPTransport:
 
     def poll_receive_all(
         self, max_count: int = 10
-    ) -> list[tuple[str, tuple[str, int]]]:
+    ) -> list[tuple[bytes, tuple[str, int]]]:
         """Non-blocking batch receive up to max_count. Reuses internal buffer."""
         self._recv_all_buf.clear()
         for _ in range(max_count):
@@ -165,52 +163,31 @@ class UDPTransport:
 
         return drained_count
 
-    def send_response(self, message: str, address: tuple[str, int]) -> bool:
+    def send(self, data: bytes, address: tuple[str, int]) -> bool:
         """
-        Send a response message to a specific address.
+        Send raw bytes to a specific address.
 
         Args:
-            message: The message string to send
+            data: Pre-packed msgpack bytes to send
             address: Tuple of (ip, port) to send to
 
         Returns:
             True if successful, False otherwise
         """
         if not self.socket or not self._running:
-            logger.warning("Cannot send response - socket not available")
+            logger.warning("Cannot send - socket not available")
             return False
 
         try:
-            # Encode and send the message
-            data = message.encode("ascii")
             self.socket.sendto(data, address)
             return True
 
         except OSError as e:
-            logger.error(f"Socket error sending UDP response: {e}")
+            logger.error(f"Socket error sending: {e}")
             return False
         except Exception as e:
-            logger.error(f"Unexpected error sending UDP response: {e}")
+            logger.error(f"Unexpected error sending: {e}")
             return False
-
-    def broadcast_message(self, message: str, addresses: list[tuple[str, int]]) -> int:
-        """
-        Broadcast a message to multiple addresses.
-
-        Args:
-            message: The message to broadcast
-            addresses: List of (ip, port) tuples to send to
-
-        Returns:
-            Number of successful sends
-        """
-        success_count = 0
-
-        for address in addresses:
-            if self.send_response(message, address):
-                success_count += 1
-
-        return success_count
 
     def is_running(self) -> bool:
         """
