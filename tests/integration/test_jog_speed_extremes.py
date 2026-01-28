@@ -102,7 +102,7 @@ class TestJogSpeedExtremes:
         initial_angles_slow = client.get_angles()
         assert initial_angles_slow is not None
 
-        result = client.jog_joint(joint_index=0, speed=10, duration=0.3)
+        result = client.jog_joint(joint_index=0, speed=10, duration=1.0)
         assert result is True
         client.wait_motion_complete(timeout=10)
 
@@ -114,7 +114,7 @@ class TestJogSpeedExtremes:
         initial_angles_fast = client.get_angles()
         assert initial_angles_fast is not None
 
-        result = client.jog_joint(joint_index=0, speed=90, duration=0.3)
+        result = client.jog_joint(joint_index=0, speed=90, duration=1.0)
         assert result is True
         client.wait_motion_complete(timeout=10)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import sys
 import time
 
 from parol6 import config as cfg
@@ -148,7 +149,9 @@ class StatusBroadcaster:
         # MULTICAST: configure multicast TTL/IF with verification and fallback
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+        # macOS requires loopback enabled for multicast to work on localhost
+        if sys.platform == "darwin":
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         sock.setblocking(False)
 
         try:
