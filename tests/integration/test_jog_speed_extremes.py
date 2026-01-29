@@ -102,25 +102,25 @@ class TestJogSpeedExtremes:
         initial_angles_slow = client.get_angles()
         assert initial_angles_slow is not None
 
-        result = client.jog_joint(joint_index=0, speed=10, duration=1.0)
+        result = client.jog_joint(joint_index=1, speed=10, duration=1.0)
         assert result is True
         client.wait_motion_complete(timeout=10)
 
         final_angles_slow = client.get_angles()
         assert final_angles_slow is not None
-        slow_movement = abs(final_angles_slow[0] - initial_angles_slow[0])
+        slow_movement = abs(final_angles_slow[1] - initial_angles_slow[1])
 
         # Now jog at fast speed
         initial_angles_fast = client.get_angles()
         assert initial_angles_fast is not None
 
-        result = client.jog_joint(joint_index=0, speed=90, duration=1.0)
+        result = client.jog_joint(joint_index=1, speed=90, duration=1.0)
         assert result is True
         client.wait_motion_complete(timeout=10)
 
         final_angles_fast = client.get_angles()
         assert final_angles_fast is not None
-        fast_movement = abs(final_angles_fast[0] - initial_angles_fast[0])
+        fast_movement = abs(final_angles_fast[1] - initial_angles_fast[1])
 
         # Fast movement should be significantly more than slow movement
         # Using a ratio check rather than absolute values for robustness
