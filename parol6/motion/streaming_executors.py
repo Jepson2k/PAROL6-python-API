@@ -218,6 +218,7 @@ class StreamingExecutor(RuckigExecutorBase):
         self._q_current_buf = np.zeros(num_dofs, dtype=np.float64)
         self._q_target_buf = np.zeros(num_dofs, dtype=np.float64)
         self._dq_buf = np.zeros(num_dofs, dtype=np.float64)
+        self._jacob0_buf = np.zeros((6, num_dofs), dtype=np.float64, order="F")
 
         # Pre-allocated buffers for Ruckig parameters - each has ONE semantic purpose
         # Position sync (current/target position share same values)
@@ -356,7 +357,8 @@ class StreamingExecutor(RuckigExecutorBase):
 
         # Get the linear part of the Jacobian (first 3 rows)
         assert PAROL6_ROBOT.robot is not None
-        J_lin = PAROL6_ROBOT.robot.jacob0(self._q_current_buf)[:3, :]
+        PAROL6_ROBOT.robot.jacob0_into(self._q_current_buf, self._jacob0_buf)
+        J_lin = self._jacob0_buf[:3, :]
 
         # Compute Cartesian velocity per unit "scale" along dq direction
         cart_vel_per_scale = np.linalg.norm(J_lin @ self._dq_buf)

@@ -1,14 +1,13 @@
 # Clean, hierarchical, vectorized, and typed robot configuration and helpers
+import atexit
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import numpy as np
-import roboticstoolbox as rtb
 from numpy.typing import NDArray
-from roboticstoolbox import ET, Link
-from roboticstoolbox.tools.urdf import URDF
+from pinokin import Robot
 
 from parol6.tools import get_tool_transform
 
@@ -53,27 +52,18 @@ _joint_limits_degree: Limits2f = np.array(
 _joint_limits_radian: Limits2f = np.deg2rad(_joint_limits_degree).astype(np.float64)
 
 
-# URDF-based robot model (frames/limits aligned with controller)
-def _load_urdf() -> URDF:
-    """Load and cache the URDF object for robot reconstruction."""
-    base_path = Path(__file__).resolve().parent / "urdf_model"
-    urdf_path = base_path / "urdf" / "PAROL6.urdf"
-    urdf_string = urdf_path.read_text(encoding="utf-8")
-    return URDF.loadstr(urdf_string, str(urdf_path), base_path=base_path)
+# URDF path for pinokin Robot
+_urdf_path = str(
+    Path(__file__).resolve().parent / "urdf_model" / "urdf" / "PAROL6.urdf"
+)
 
-
-# Cache the URDF object (parsed once, reused for robot reconstruction)
-_cached_urdf = _load_urdf()
-
-# Current robot instance (rebuilt when tool changes)
-robot = None
+# Current robot instance (tool transform applied in-place)
+robot: Robot | None = None
 
 
 def apply_tool(tool_name: str) -> None:
     """
-    Rebuild the robot with the specified tool as an additional link.
-    This ensures the tool transform is properly integrated into the kinematic chain
-    and affects forward kinematics calculations.
+    Apply tool transform to the robot model.
 
     Parameters
     ----------
@@ -82,39 +72,28 @@ def apply_tool(tool_name: str) -> None:
     """
     global robot
 
-    # Get tool transform
+    if robot is None:
+        robot = Robot(_urdf_path)
+
     T_tool = get_tool_transform(tool_name)
 
-    # Get the base elinks from cached URDF
-    base_links = list(_cached_urdf.elinks)
-
-    # Create a tool link if there's a non-identity transform
     if tool_name != "NONE" and not np.allclose(T_tool, np.eye(4)):
-        # Create an ELink for the tool
-        # The tool is a fixed transform from the last joint
-        # ET.SE3 accepts a 4x4 numpy array directly
-        tool_link = Link(
-            ET.SE3(T_tool),
-            name=f"tool_{tool_name}",
-            parent=base_links[-1],  # Attach to the last link
-        )
-
-        # Add tool link to the chain
-        all_links = base_links + [tool_link]
-        logger.info(f"Applied tool '{tool_name}' to robot model as link")
+        robot.set_tool_transform(T_tool)
+        logger.info(f"Applied tool '{tool_name}' to robot model")
     else:
-        all_links = base_links
-        logger.info(f"Applied tool '{tool_name}' (no additional link needed)")
-
-    # Create robot with the complete link chain
-    robot = rtb.Robot(
-        all_links,
-        name=_cached_urdf.name,
-    )
+        robot.clear_tool_transform()
+        logger.info(f"Applied tool '{tool_name}' (identity)")
 
 
 # Initialize with no tool
 apply_tool("NONE")
+
+
+@atexit.register
+def _cleanup_robot() -> None:
+    global robot
+    robot = None
+
 
 # -----------------------------
 # Additional raw parameter arrays

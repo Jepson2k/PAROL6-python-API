@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import logging
 from collections import deque
 from dataclasses import dataclass, field
@@ -260,11 +261,8 @@ class ControllerState:
         """Set the current tool and apply it to the robot model."""
         if tool_name != self._current_tool:
             self._current_tool = tool_name
-            # Apply tool to robot model (rebuilds with tool as final link)
+            # Apply tool to robot model (updates tool transform in-place)
             PAROL6_ROBOT.apply_tool(tool_name)
-            # Invalidate FK cache (ETS fknm changes with tool)
-            global _ets_cached_fknm
-            _ets_cached_fknm = None
             logger.info(f"Tool changed to {tool_name}")
 
 
@@ -332,6 +330,15 @@ class StateManager:
 _state_manager: StateManager | None = None
 
 
+@atexit.register
+def _cleanup_state_manager() -> None:
+    global _state_manager
+    if _state_manager is not None and _state_manager._state is not None:
+        _state_manager._state.streaming_executor = None
+        _state_manager._state.cartesian_streaming_executor = None
+    _state_manager = None
+
+
 def get_instance() -> StateManager:
     """
     Get the global StateManager instance.
@@ -353,32 +360,14 @@ def get_state() -> ControllerState:
 # Forward kinematics cache management
 # -----------------------------
 
-# Import direct C FK function (bypasses SE3 wrapper for 10x speedup)
-from roboticstoolbox.fknm import ETS_fkine  # noqa: E402
-
-# Cached ETS fknm for direct C FK (invalidated on tool change via invalidate_fkine_cache)
-_ets_cached_fknm = None
-
-
-def _get_cached_ets():
-    """Get cached ETS fknm object, rebuilding if None."""
-    global _ets_cached_fknm
-    if _ets_cached_fknm is None:
-        assert PAROL6_ROBOT.robot is not None
-        _ets_cached_fknm = PAROL6_ROBOT.robot.ets()._fknm
-        logger.debug("ETS fknm cache initialized")
-    return _ets_cached_fknm
-
 
 def invalidate_fkine_cache() -> None:
     """
     Invalidate the fkine cache, forcing recomputation on next access.
     Called when the robot model changes (e.g., tool change).
     """
-    global _ets_cached_fknm
     state = get_state()
     state._fkine_last_tool = ""
-    _ets_cached_fknm = None
     logger.debug("fkine cache invalidated")
 
 
@@ -392,16 +381,13 @@ def ensure_fkine_updated(state: ControllerState) -> None:
     state : ControllerState
         The controller state to update
     """
-    # Check if cache is valid
     pos_changed = not arrays_equal_6(state.Position_in, state._fkine_last_pos_in)
     tool_changed = state.current_tool != state._fkine_last_tool
 
     if pos_changed or tool_changed:
-        # Recompute fkine using direct C call (bypasses SE3 wrapper)
         steps_to_rad(state.Position_in, state._fkine_q_rad)
-        fknm = _get_cached_ets()
-        # Pass pre-allocated buffer directly - avoids allocation and copy
-        ETS_fkine(fknm, state._fkine_q_rad, None, None, True, state._fkine_mat)
+        assert PAROL6_ROBOT.robot is not None
+        PAROL6_ROBOT.robot.fkine_into(state._fkine_q_rad, state._fkine_mat)
 
         # Cache as flattened 16-vector with mm translation (zero-allocation)
         state._fkine_flat_mm[:] = state._fkine_mat.ravel()

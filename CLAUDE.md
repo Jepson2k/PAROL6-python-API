@@ -102,8 +102,7 @@ parol6-server --serial=/dev/ttyUSB0 --log-level=DEBUG
 
 ## Kinematics Notes
 
-- Uses numerical IK via robotics-toolbox-python (custom fork with platform-specific wheels)
-- Slight stutter near singularities is a known limitation
+- Uses numerical IK via pinokin (C++/Pinocchio with nanobind Python bindings)
 - J4 is particularly sensitive—some cartesian targets may fail to solve
 - Update `PAROL6_ROBOT.py` for modified hardware (gear ratios, limits, DH params)
 

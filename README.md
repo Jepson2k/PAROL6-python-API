@@ -89,7 +89,7 @@ The default control loop rate is **100 Hz** (`PAROL6_CONTROL_RATE_HZ=100`). High
 The library has been optimized for real-time performance:
 - **Numba JIT compilation** for hot conversion functions (steps↔radians, degrees)
 - **NumPy vectorization** with pre-allocated buffers to minimize allocations
-- **C++ robotics-toolbox backend** for kinematics computations
+- **C++ pinokin backend** for kinematics computations
 - **Very few hot-loop allocations** - most buffers are reused
 
 Even under complete IK failure (worst-case computation), the control loop typically completes in **under 2ms**. However, consistent high-rate performance requires consideration of OS scheduling—the operating system commonly interrupts user-space processes, which can cause jitter at higher rates.
@@ -299,42 +299,16 @@ For Cartesian moves, joint limits stay at 100% as hard bounds—speed percentage
 
 ## Kinematics, IK, and singularities
 Numerical IK vs. analytical:
-- This project uses numerical IK (via robotics-toolbox-python) for flexibility: it adapts to tool changes and hardware modifications without deriving new closed forms
-- Trade-offs: numerical IK can be slower and less robust near singularities compared to an ideal analytical solver
+- This project uses numerical IK (via pinokin) for flexibility: it adapts to tool changes and hardware modifications without deriving new closed forms
+- Trade-offs: numerical IK can be less robust near singularities compared to an ideal analytical solver
 
 Known behaviors and limitations:
-- The current robotics-toolbox-python backend used here does not expose null-space manipulation in C. As a result, some cartesian targets can fail to solve—joint 4 (J4) is particularly sensitive. Future work in the ported backend may add null-space features.
+- Some cartesian targets can fail to solve—joint 4 (J4) is particularly sensitive
 
 Adapting to modified hardware:
 - Update `parol6/PAROL6_ROBOT.py` (gear ratios, joint limits, speed/acc/jerk limits)
 - Update tool transforms in `parol6/tools.py` (4×4 SE3 matrices)
 - Optionally update the URDF in `parol6/urdf_model/` for visualization or geometry changes
-- Advanced: you can also add or replace DH joints programmatically without modifying the URDF. For example:
-
-  ```python
-  # Example: replace the 3rd joint with a custom DH link without editing the URDF
-  from roboticstoolbox import Link, ET
-  from parol6.PAROL6_ROBOT import _cached_urdf
-  import roboticstoolbox as rtb
-
-  base_links = list(_cached_urdf.elinks)
-
-  # Create a new DH link (Revolute) – customize a, d, alpha, and any fixed offset
-  j3_custom = Link(ET.DH(a=0.045, d=0.0, alpha=0.0), name="J3_custom", parent=base_links[1])
-
-  # Rebuild link chain: keep upstream joints as-is, insert replacement, then reuse downstream links
-  all_links = [
-      base_links[0],           # J1
-      base_links[1],           # J2
-      j3_custom,               # new J3
-      *base_links[3:],         # J4..end reuse
-  ]
-
-  robot = rtb.Robot(all_links, name=_cached_urdf.name)
-  # Apply a tool afterward if needed (see parol6.tools)
-  ```
-
-- Note: The bundled URDF and STL assets have been adjusted from the originals to make robotics‑toolbox‑python Cartesian transforms behave correctly. Programmatic DH edits let you experiment without modifying those files.
 
 
 ## Tools

@@ -563,6 +563,9 @@ IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(
 # Utility Functions
 # -----------------------------------------------------------------------------
 
+# Pre-allocated Jacobian buffer for zero-alloc hot path
+_jacob0_buf = np.zeros((6, 6), dtype=np.float64, order="F")
+
 
 def compute_cart_velocity_limited_joints(
     q_current: NDArray,
@@ -587,7 +590,8 @@ def compute_cart_velocity_limited_joints(
     v_max_rad = LIMITS.joint.hard.velocity
 
     assert PAROL6_ROBOT.robot is not None
-    J_lin = PAROL6_ROBOT.robot.jacob0(q_current)[:3, :]
+    PAROL6_ROBOT.robot.jacob0_into(q_current, _jacob0_buf)
+    J_lin = _jacob0_buf[:3, :]
     cart_vel_per_scale = np.linalg.norm(J_lin @ dq)
 
     if cart_vel_per_scale < 1e-9:

@@ -3,15 +3,15 @@ IK Helper Functions and Utilities
 Shared functions used by multiple command classes for inverse kinematics calculations.
 """
 
+import atexit
 import logging
 import time
-from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
-from roboticstoolbox import DHRobot
-from roboticstoolbox.robot.IK import IKResultBuffer
+from pinokin import Damping as _Damping, IKSolver as _IKSolver, Robot
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 from parol6.config import IK_SAFETY_MARGINS_RAD
@@ -19,56 +19,77 @@ from parol6.config import IK_SAFETY_MARGINS_RAD
 logger = logging.getLogger(__name__)
 
 # Rate limiting for IK warnings (avoid log spam at 250Hz)
-_ik_warn_state: dict = {
-    "last_warn_time": 0.0,
-    "interval": 1.0,  # Log at most once per second
-}
+_ik_last_warn_time: float = 0.0
+_IK_WARN_INTERVAL: float = 1.0  # Log at most once per second
 
 
 def _rate_limited_warning(msg: str) -> None:
     """Log a warning with rate limiting to avoid spam."""
+    global _ik_last_warn_time
     now = time.monotonic()
-    if now - _ik_warn_state["last_warn_time"] > _ik_warn_state["interval"]:
+    if now - _ik_last_warn_time > _IK_WARN_INTERVAL:
         logger.warning(msg)
-        _ik_warn_state["last_warn_time"] = now
+        _ik_last_warn_time = now
 
 
-# Cache for robot.qlim and robot.ets() to avoid expensive recomputation
-# Invalidated when robot instance changes (e.g., tool change)
-_ik_cache: dict = {
-    "robot_id": None,
-    "qlim": None,
-    "ets": None,
-    "buffered_min": None,
-    "buffered_max": None,
-    "result_buf": None,  # Pre-allocated IKResultBuffer for zero-allocation IK
-}
+@dataclass
+class SolveIKResult:
+    """IK result with safety violation tracking."""
+
+    q: NDArray[np.float64]
+    success: bool
+    iterations: int
+    residual: float
+    violations: str | None = None
 
 
-def _get_cached_ik_data(robot: "DHRobot") -> tuple:
-    """
-    Get cached qlim, ets, buffered limits, and result buffer for the robot.
-    Cache is invalidated when robot instance changes.
+# Cached solver state — invalidated when robot instance changes (e.g., tool change)
+_cached_robot_id: int = -1
+_cached_qlim: NDArray[np.float64] | None = None
+_cached_solver: _IKSolver | None = None
+_cached_buffered_min: NDArray[np.float64] | None = None
+_cached_buffered_max: NDArray[np.float64] | None = None
+_cached_qlim_min: NDArray[np.float64] | None = None
+_cached_qlim_max: NDArray[np.float64] | None = None
+_cached_result: SolveIKResult | None = None
 
-    Returns (qlim, ets, buffered_min, buffered_max, result_buf)
-    """
+
+@atexit.register
+def _cleanup_ik_cache() -> None:
+    global _cached_solver
+    _cached_solver = None
+
+
+def _ensure_cache(robot: Robot) -> None:
+    """Rebuild cache if robot instance changed."""
+    global _cached_robot_id, _cached_qlim, _cached_solver
+    global _cached_buffered_min, _cached_buffered_max, _cached_result
+    global _cached_qlim_min, _cached_qlim_max
+
     robot_id = id(robot)
-    if _ik_cache["robot_id"] != robot_id:
-        qlim = robot.qlim
-        n_joints = qlim.shape[1]
-        _ik_cache["robot_id"] = robot_id
-        _ik_cache["qlim"] = qlim
-        _ik_cache["ets"] = robot.ets()
-        _ik_cache["buffered_min"] = qlim[0, :] + IK_SAFETY_MARGINS_RAD[:, 0]
-        _ik_cache["buffered_max"] = qlim[1, :] - IK_SAFETY_MARGINS_RAD[:, 1]
-        _ik_cache["result_buf"] = SolveIKResultBuffer(n_joints)
+    if _cached_robot_id == robot_id:
+        return
 
-    return (
-        _ik_cache["qlim"],
-        _ik_cache["ets"],
-        _ik_cache["buffered_min"],
-        _ik_cache["buffered_max"],
-        _ik_cache["result_buf"],
+    qlim = robot.qlim
+    _cached_robot_id = robot_id
+    _cached_qlim = qlim
+    _cached_qlim_min = np.ascontiguousarray(qlim[0, :])
+    _cached_qlim_max = np.ascontiguousarray(qlim[1, :])
+    _cached_solver = _IKSolver(
+        robot,
+        damping=_Damping.Sugihara,
+        tol=1e-12,
+        lm_lambda=0.0,
+        max_iter=10,
+        max_restarts=10,
+    )
+    _cached_buffered_min = qlim[0, :] + IK_SAFETY_MARGINS_RAD[:, 0]
+    _cached_buffered_max = qlim[1, :] - IK_SAFETY_MARGINS_RAD[:, 1]
+    _cached_result = SolveIKResult(
+        q=np.zeros(qlim.shape[1], dtype=np.float64),
+        success=False,
+        iterations=0,
+        residual=0.0,
     )
 
 
@@ -91,24 +112,6 @@ AXIS_MAP = {
 
 
 @njit(cache=True)
-def unwrap_angles(
-    q_solution: NDArray[np.float64],
-    q_current: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """
-    Vectorized unwrap: bring solution angles near current by adding/subtracting 2*pi.
-    This minimizes joint motion between consecutive configurations.
-    """
-    qs = np.asarray(q_solution, dtype=np.float64)
-    qc = np.asarray(q_current, dtype=np.float64)
-    diff = qs - qc
-    q_unwrapped = qs.copy()
-    q_unwrapped[diff > np.pi] -= 2 * np.pi
-    q_unwrapped[diff < -np.pi] += 2 * np.pi
-    return q_unwrapped
-
-
-@njit(cache=True)
 def _ik_safety_check(
     q: NDArray[np.float64],
     cq: NDArray[np.float64],
@@ -118,37 +121,34 @@ def _ik_safety_check(
     qlim_max: NDArray[np.float64],
 ) -> tuple[bool, bool, int]:
     """
-    JIT-compiled IK safety validation.
+    JIT-compiled IK safety validation (zero-allocation scalar loop).
     Returns (ok, is_recovery_violation, violation_idx).
     """
-    in_danger_old = (cq < buffered_min) | (cq > buffered_max)
-    dist_old = np.minimum(np.abs(cq - qlim_min), np.abs(cq - qlim_max))
-    dist_new = np.minimum(np.abs(q - qlim_min), np.abs(q - qlim_max))
-    recovery_violations = in_danger_old & (dist_new < dist_old)
-    in_danger_new = (q < buffered_min) | (q > buffered_max)
-    safety_violations = (~in_danger_old) & in_danger_new
-
-    if np.any(recovery_violations):
-        return False, True, int(np.argmax(recovery_violations))
-    if np.any(safety_violations):
-        return False, False, int(np.argmax(safety_violations))
+    recovery_idx = -1
+    safety_idx = -1
+    for i in range(q.shape[0]):
+        in_danger = cq[i] < buffered_min[i] or cq[i] > buffered_max[i]
+        if in_danger:
+            d_old = min(abs(cq[i] - qlim_min[i]), abs(cq[i] - qlim_max[i]))
+            d_new = min(abs(q[i] - qlim_min[i]), abs(q[i] - qlim_max[i]))
+            if d_new < d_old and recovery_idx < 0:
+                recovery_idx = i
+        else:
+            if (q[i] < buffered_min[i] or q[i] > buffered_max[i]) and safety_idx < 0:
+                safety_idx = i
+    if recovery_idx >= 0:
+        return False, True, recovery_idx
+    if safety_idx >= 0:
+        return False, False, safety_idx
     return True, False, -1
 
 
-class SolveIKResultBuffer(IKResultBuffer):
-    """IKResultBuffer extended with violations field."""
-
-    def __init__(self, n: int = 6) -> None:
-        super().__init__(n)
-        self.violations: str | None = None
-
-
 def solve_ik(
-    robot: DHRobot,
+    robot: Robot,
     target_pose: NDArray[np.float64],
-    current_q: Sequence[float] | NDArray[np.float64],
+    current_q: NDArray[np.float64],
     quiet_logging: bool = False,
-) -> SolveIKResultBuffer:
+) -> SolveIKResult:
     """
     IK solver with per-joint safety margins.
 
@@ -158,53 +158,51 @@ def solve_ik(
 
     Parameters
     ----------
-    robot : DHRobot
-        Robot model
+    robot : Robot
+        pinokin Robot model
     target_pose : NDArray[np.float64]
         Target pose as 4x4 SE3 transformation matrix
-    current_q : array_like
+    current_q : NDArray[np.float64]
         Current joint configuration in radians
     quiet_logging : bool, optional
         If True, suppress warning logs (default: False)
 
     Returns
     -------
-    SolveIKResultBuffer
+    SolveIKResult
         success - True if solution found
         q - Joint configuration in radians
         iterations - Number of iterations used
         residual - Final error value
         violations - Error message if failed, None if successful
     """
-    cq: NDArray[np.float64] = np.asarray(current_q, dtype=np.float64)
+    _ensure_cache(robot)
+    assert _cached_solver is not None
+    assert _cached_result is not None
+    solver = _cached_solver
+    result = _cached_result
 
-    # Get cached robot data (qlim, ets, buffered limits, result buffer)
-    qlim, ets, buffered_min, buffered_max, result = _get_cached_ik_data(robot)
+    solver.solve(target_pose, q0=current_q)
 
-    # ik_LM accepts numpy 4x4 matrices
-    target_matrix = np.asarray(target_pose, dtype=np.float64)
-
-    ets.ik_LM(
-        target_matrix,
-        q0=cq,
-        tol=1e-12,
-        joint_limits=True,
-        k=0.0,
-        method="sugihara",
-        ilimit=10,
-        slimit=10,
-        result=result,  # Zero-allocation: C writes to pre-allocated buffer
-    )  # tol=1e-12 required for sub-mm jogs
-
+    # Write into pre-allocated result buffer (zero-allocation)
+    result.q[:] = solver.q
+    result.success = solver.success
+    result.iterations = solver.iterations
+    result.residual = solver.residual
     result.violations = None
 
     if result.success:
         # JIT-compiled safety validation
         ok, is_recovery, idx = _ik_safety_check(
-            result.q, cq, buffered_min, buffered_max, qlim[0, :], qlim[1, :]
+            result.q,
+            current_q,
+            _cached_buffered_min,
+            _cached_buffered_max,  # type: ignore[arg-type]
+            _cached_qlim_min,
+            _cached_qlim_max,  # type: ignore[arg-type]
         )
         if not ok:
-            result._scalars[0] = 0  # Set success=False via underlying storage
+            result.success = False
             if is_recovery:
                 result.violations = (
                     f"J{idx + 1} moving further into danger zone (recovery blocked)"
@@ -217,19 +215,13 @@ def solve_ik(
                 _rate_limited_warning(result.violations)
 
     if result.success:
-        # Valid solution - apply unwrapping to minimize joint motion
-        q_unwrapped = unwrap_angles(result.q, current_q)
-
-        # Verify unwrapped solution still within actual limits
-        within_limits = check_limits(
-            current_q, q_unwrapped, allow_recovery=True, log=not quiet_logging
-        )
-
-        if within_limits:
-            result.q[:] = q_unwrapped
-        # else: keep original result.q which already passed library's limit check
+        if not check_limits(
+            current_q, result.q, allow_recovery=True, log=not quiet_logging
+        ):
+            result.success = False
     else:
-        result.violations = "IK failed to solve."
+        if result.violations is None:
+            result.violations = "IK failed to solve."
 
     return result
 
@@ -244,6 +236,9 @@ _cl_above = np.zeros(6, dtype=np.bool_)
 _cl_cur_viol = np.zeros(6, dtype=np.bool_)
 _cl_t_below = np.zeros(6, dtype=np.bool_)
 _cl_t_above = np.zeros(6, dtype=np.bool_)
+_cl_dummy_target = np.zeros(6, dtype=np.float64)
+_cl_mn = np.ascontiguousarray(PAROL6_ROBOT._joint_limits_radian[:, 0])
+_cl_mx = np.ascontiguousarray(PAROL6_ROBOT._joint_limits_radian[:, 1])
 _last_violation_mask = np.zeros(6, dtype=np.bool_)
 _last_any_violation = False
 
@@ -317,20 +312,18 @@ def check_limits(
     global _last_any_violation
 
     q_arr = np.asarray(q, dtype=np.float64).reshape(-1)
-    mn = PAROL6_ROBOT._joint_limits_radian[:, 0]
-    mx = PAROL6_ROBOT._joint_limits_radian[:, 1]
     has_target = target_q is not None
     t_arr = (
         np.asarray(target_q, dtype=np.float64).reshape(-1)
         if has_target
-        else np.zeros(6, dtype=np.float64)
+        else _cl_dummy_target
     )
 
     all_ok = _check_limits_core(
         q_arr,
         t_arr,
-        mn,
-        mx,
+        _cl_mn,
+        _cl_mx,
         allow_recovery,
         has_target,
         _cl_viol,

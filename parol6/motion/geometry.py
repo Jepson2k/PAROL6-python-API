@@ -19,7 +19,7 @@ from scipy.interpolate import CubicSpline
 from scipy.spatial.transform import Rotation, Slerp
 
 if TYPE_CHECKING:
-    from roboticstoolbox import DHRobot
+    from pinokin import Robot
 
 from parol6.config import CONTROL_RATE_HZ
 
@@ -388,7 +388,7 @@ class SplineMotion(_ShapeGenerator):
 
 def joint_path_to_tcp_poses(
     joint_positions: NDArray[np.float64],
-    robot: "DHRobot | None" = None,
+    robot: "Robot | None" = None,
 ) -> NDArray[np.float64]:
     """Convert joint-space path to TCP poses using forward kinematics.
 
@@ -397,35 +397,27 @@ def joint_path_to_tcp_poses(
 
     Args:
         joint_positions: (N, 6) array of joint angles in radians
-        robot: roboticstoolbox robot model (uses PAROL6_ROBOT.robot if None)
+        robot: pinokin Robot model (uses PAROL6_ROBOT.robot if None)
 
     Returns:
         (N, 6) array of [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] poses
     """
-    from roboticstoolbox.fknm import ETS_fkine
     from scipy.spatial.transform import Rotation
 
     if robot is None:
-        # Use cached fknm from state module (common case)
-        from parol6.server.state import _get_cached_ets
+        import parol6.PAROL6_ROBOT as PAROL6_ROBOT
 
-        fknm = _get_cached_ets()
-    else:
-        # Custom robot passed - build ETS directly
-        fknm = robot.ets()._fknm
+        robot = PAROL6_ROBOT.robot
+    assert robot is not None
+
+    # Batch FK in C++ (single call, no Python loop overhead)
+    transforms = robot.batch_fk(joint_positions)
 
     n_points = len(joint_positions)
     tcp_poses = np.empty((n_points, 6), dtype=np.float64)
 
-    # Pre-allocate FK output buffer (Fortran order for roboticstoolbox)
-    T = np.asfortranarray(np.eye(4, dtype=np.float64))
-
-    for i, q in enumerate(joint_positions):
-        # Direct C FK with pre-allocated buffer (no allocation per call)
-        ETS_fkine(fknm, q, None, None, True, T)
-        # Extract position (meters -> mm)
+    for i, T in enumerate(transforms):
         tcp_poses[i, :3] = T[:3, 3] * 1000.0  # m -> mm
-        # Extract orientation from rotation matrix
         rpy = Rotation.from_matrix(T[:3, :3]).as_euler("xyz", degrees=True)
         tcp_poses[i, 3:] = rpy
 

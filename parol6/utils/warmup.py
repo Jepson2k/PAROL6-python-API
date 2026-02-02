@@ -68,7 +68,7 @@ from parol6.server.transports.mock_serial_transport import (
     _simulate_motion_jit,
     _write_frame_jit,
 )
-from parol6.utils.ik import _check_limits_core, _ik_safety_check, unwrap_angles
+from parol6.utils.ik import _check_limits_core, _ik_safety_check
 from parol6.utils.se3_utils import (
     _compute_V_inv_matrix,
     _compute_V_matrix,
@@ -131,7 +131,6 @@ def warmup_jit() -> float:
     speed_rad_to_steps_scalar(0.0, 0)
 
     # parol6/utils/ik.py
-    unwrap_angles(dummy_6f, dummy_6f)
     _ik_safety_check(dummy_6f, dummy_6f, dummy_6f, dummy_6f, dummy_6f, dummy_6f)
     viol = np.zeros(6, dtype=np.bool_)
     _check_limits_core(

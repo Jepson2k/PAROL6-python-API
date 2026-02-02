@@ -144,17 +144,21 @@ class IKWorkerClient:
         self._shutdown_event = None
         self._request_event = None
 
-        # Release memoryviews before closing shared memory to avoid BufferError
+        # Release all references to shared memory buffers before closing.
+        # numpy views (frombuffer) hold pointers into the mmap; if they survive
+        # past shm.close() the mmap raises BufferError, which during interpreter
+        # shutdown can prevent later atexit handlers from running.
+        self._output_arr = None
         try:
             if self._input_mv is not None:
                 self._input_mv.release()
         except BufferError:
-            pass  # Already released or not releasable
+            pass
         try:
             if self._output_mv is not None:
                 self._output_mv.release()
         except BufferError:
-            pass  # Already released or not releasable
+            pass
         self._input_mv = None
         self._output_mv = None
 

@@ -1036,8 +1036,9 @@ class TrajectoryBuilder:
             # Use scaled joint limits (respects user's velocity_percent)
             v_max_joint = self.v_max
 
-            # Pre-allocate buffer for velocity limits (avoids per-call allocation)
+            # Pre-allocate buffers for velocity limits (avoids per-call allocation)
             vlim_buffer = np.empty((6, 2), dtype=np.float64)
+            _jac_buf = np.zeros((6, 6), dtype=np.float64, order="F")
 
             def vlim_func(s: float) -> NDArray:
                 """Compute velocity limits at path position s using path tangent."""
@@ -1046,7 +1047,8 @@ class TrajectoryBuilder:
 
                 # Get the linear part of the Jacobian (first 3 rows)
                 assert robot is not None
-                J_lin = robot.jacob0(q)[:3, :]
+                robot.jacob0_into(q, _jac_buf)
+                J_lin = _jac_buf[:3, :]
 
                 # Cartesian velocity per unit s_dot along path tangent
                 cart_vel_per_sdot = np.linalg.norm(J_lin @ dq_ds)

@@ -37,7 +37,7 @@ def test_ik_worker_detects_joint_limits():
         q[0] = qlim[1, 0] - 0.001  # J1 very near max limit
 
         T = PAROL6_ROBOT.robot.fkine(q)
-        T_matrix = T.A
+        T_matrix = T
 
         client.submit_request(q, T_matrix)
 
@@ -63,7 +63,7 @@ def test_ik_worker_detects_joint_limits():
         q[0] = qlim[0, 0] + 0.001  # J1 very near min limit
 
         T = PAROL6_ROBOT.robot.fkine(q)
-        T_matrix = T.A
+        T_matrix = T
 
         client.submit_request(q, T_matrix)
 
@@ -107,7 +107,7 @@ def test_ik_worker_all_enabled_in_safe_position():
         q_home = np.deg2rad(HOME_ANGLES_DEG)
 
         T = PAROL6_ROBOT.robot.fkine(q_home)
-        T_matrix = T.A
+        T_matrix = T
 
         client.submit_request(q_home, T_matrix)
 
