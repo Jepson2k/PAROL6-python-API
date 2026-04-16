@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "parol6"
-version = "0.2.3"
+version = "0.2.4"
 description = "Python library for controlling PAROL6 robot arms"
 
 requires-python = ">=3.11"
@@ -124,7 +124,7 @@ parol6 = ["urdf_model/**"]
 github_url = "https://github.com/Jepson2k/PAROL6-python-API"
 
 [tool.tbump.version]
-current = "0.2.3"
+current = "0.2.4"
 regex = '''(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'''
 
 [tool.tbump.git]
