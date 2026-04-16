@@ -87,13 +87,16 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
 
     PARAMS_TYPE = None  # Not wire-registered — instantiated by ToolActionCommand
 
-    # Stall detection: when feedback_position stays within ``_STALL_DEAD_BAND``
-    # of a baseline for ``_STALL_TICKS`` consecutive ticks past the grace
-    # period, the gripper is considered blocked (grasping an object) and the
-    # command completes. Backstop for cases where the firmware's
-    # object-detection bit is too flaky for the debouncer to latch.
+    # Stall detection: track the smallest distance-to-target seen so far and
+    # stall when no forward progress is made for ``_STALL_TICKS`` consecutive
+    # ticks past the grace period. "Forward progress" means closing the gap
+    # to target by at least ``_STALL_DEAD_BAND`` units below the best seen.
+    # This is robust to PID hunting around the stall point — oscillation
+    # never beats the best, so the counter keeps draining. Backstop for
+    # cases where the firmware's object-detection bit is too flaky for the
+    # debouncer to latch.
     _STALL_TICKS: int = 20  # 200 ms at 100 Hz
-    _STALL_DEAD_BAND: int = 2  # 2/255 ≈ 0.8% of full range
+    _STALL_DEAD_BAND: int = 2  # progress threshold, 2/255 ≈ 0.8% of full range
     _GRACE_TICKS: int = 10  # 100 ms before stall checks begin
 
     __slots__ = (
@@ -103,7 +106,7 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         "wait_counter",
         "_hw_position",
         "_hw_speed",
-        "_stall_baseline",
+        "_stall_best_distance",
         "_stall_remaining",
         "_grace_remaining",
     )
@@ -116,7 +119,7 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         self.wait_counter = 0
         self._hw_position = 0
         self._hw_speed = 1
-        self._stall_baseline = 0
+        self._stall_best_distance = 256  # larger than any possible distance
         self._stall_remaining = self._STALL_TICKS
         self._grace_remaining = self._GRACE_TICKS
 
@@ -198,11 +201,12 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
                     self.finish()
                     return ExecutionStatusCode.COMPLETED
 
+            distance = abs(current_position - self._hw_position)
             if self._grace_remaining > 0:
                 self._grace_remaining -= 1
-                self._stall_baseline = current_position
-            elif abs(current_position - self._stall_baseline) > self._STALL_DEAD_BAND:
-                self._stall_baseline = current_position
+                self._stall_best_distance = distance
+            elif distance + self._STALL_DEAD_BAND <= self._stall_best_distance:
+                self._stall_best_distance = distance
                 self._stall_remaining = self._STALL_TICKS
             else:
                 self._stall_remaining -= 1
