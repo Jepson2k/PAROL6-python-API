@@ -87,6 +87,15 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
 
     PARAMS_TYPE = None  # Not wire-registered — instantiated by ToolActionCommand
 
+    # Stall detection: when feedback_position stays within ``_STALL_DEAD_BAND``
+    # of a baseline for ``_STALL_TICKS`` consecutive ticks past the grace
+    # period, the gripper is considered blocked (grasping an object) and the
+    # command completes. Backstop for cases where the firmware's
+    # object-detection bit is too flaky for the debouncer to latch.
+    _STALL_TICKS: int = 20  # 200 ms at 100 Hz
+    _STALL_DEAD_BAND: int = 2  # 2/255 ≈ 0.8% of full range
+    _GRACE_TICKS: int = 10  # 100 ms before stall checks begin
+
     __slots__ = (
         "state",
         "timeout_counter",
@@ -94,6 +103,9 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         "wait_counter",
         "_hw_position",
         "_hw_speed",
+        "_stall_baseline",
+        "_stall_remaining",
+        "_grace_remaining",
     )
 
     def __init__(self, p: ElectricGripperParams):
@@ -104,6 +116,9 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
         self.wait_counter = 0
         self._hw_position = 0
         self._hw_speed = 1
+        self._stall_baseline = 0
+        self._stall_remaining = self._STALL_TICKS
+        self._grace_remaining = self._GRACE_TICKS
 
     @classmethod
     def from_tool_action(
@@ -181,6 +196,19 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
 
                 if (object_detection == 2) and (self._hw_position < current_position):
                     self.finish()
+                    return ExecutionStatusCode.COMPLETED
+
+            if self._grace_remaining > 0:
+                self._grace_remaining -= 1
+                self._stall_baseline = current_position
+            elif abs(current_position - self._stall_baseline) > self._STALL_DEAD_BAND:
+                self._stall_baseline = current_position
+                self._stall_remaining = self._STALL_TICKS
+            else:
+                self._stall_remaining -= 1
+                if self._stall_remaining <= 0:
+                    self.finish()
+                    hw.set_command_bits(move_active=False, estop=estop)
                     return ExecutionStatusCode.COMPLETED
 
             return ExecutionStatusCode.EXECUTING
