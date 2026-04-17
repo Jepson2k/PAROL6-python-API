@@ -211,8 +211,10 @@ class ElectricGripperCommand(MotionCommand[ElectricGripperParams]):
             else:
                 self._stall_remaining -= 1
                 if self._stall_remaining <= 0:
+                    # Leave move_active set so the firmware keeps applying
+                    # motor force on the grasped object — clearing it would
+                    # release the grip and the item would slip out.
                     self.finish()
-                    hw.set_command_bits(move_active=False, estop=estop)
                     return ExecutionStatusCode.COMPLETED
 
             return ExecutionStatusCode.EXECUTING
