@@ -547,6 +547,19 @@ JOG_MIN_STEPS: int = int(CONTROL_RATE_HZ)  # steps/s
 CART_LIN_JOG_MIN: float = CONTROL_RATE_HZ / 100  # mm/s (scales with control rate)
 CART_ANG_JOG_MIN: float = 1.0  # deg/s
 
+# IK null-space optimization (ported from RTB _calc_qnull into pinokin).
+# For a full-rank 6-DOF / 6-D task this is a no-op; it becomes useful near
+# singular configurations and when the task is reduced (e.g. position-only).
+# Defaults keep it disabled — flip IK_NULLSPACE_ENABLED to True to use the
+# tuned gains below at runtime.
+IK_NULLSPACE_ENABLED: bool = str(
+    os.getenv("PAROL6_IK_NULLSPACE", "0")
+).strip().lower() in ("1", "true", "yes", "on")
+IK_NULLSPACE_KQ: float = float(os.getenv("PAROL6_IK_NULLSPACE_KQ", "0.1"))
+IK_NULLSPACE_KM: float = float(os.getenv("PAROL6_IK_NULLSPACE_KM", "0.0"))
+IK_NULLSPACE_PS: float = float(os.getenv("PAROL6_IK_NULLSPACE_PS", "0.0"))
+IK_NULLSPACE_PI: float = float(os.getenv("PAROL6_IK_NULLSPACE_PI", "0.3"))
+
 # Per-joint IK safety margins (radians) - [min_margin, max_margin] per joint
 # Direction-aware: J3 backwards bend (max) is a trap, but inward (min) is safe
 IK_SAFETY_MARGINS_RAD: NDArray[np.float64] = np.array(

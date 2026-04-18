@@ -14,6 +14,7 @@ from numpy.typing import ArrayLike, NDArray
 from pinokin import Damping as _Damping, IKSolver as _IKSolver, Robot
 
 import parol6.PAROL6_ROBOT as PAROL6_ROBOT
+from parol6 import config as _cfg
 from parol6.config import IK_SAFETY_MARGINS_RAD
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,12 @@ def _ensure_cache(robot: Robot) -> None:
     _cached_qlim = qlim
     _cached_qlim_min = np.ascontiguousarray(qlim[0, :])
     _cached_qlim_max = np.ascontiguousarray(qlim[1, :])
+    if _cfg.IK_NULLSPACE_ENABLED:
+        kq = _cfg.IK_NULLSPACE_KQ
+        km = _cfg.IK_NULLSPACE_KM
+    else:
+        kq = 0.0
+        km = 0.0
     _cached_solver = _IKSolver(
         robot,
         damping=_Damping.Sugihara,
@@ -88,6 +95,10 @@ def _ensure_cache(robot: Robot) -> None:
         lm_lambda=0.0,
         max_iter=10,
         max_restarts=10,
+        kq=kq,
+        km=km,
+        ps=_cfg.IK_NULLSPACE_PS,
+        pi=_cfg.IK_NULLSPACE_PI,
     )
     _cached_buffered_min = qlim[0, :] + IK_SAFETY_MARGINS_RAD[:, 0]
     _cached_buffered_max = qlim[1, :] - IK_SAFETY_MARGINS_RAD[:, 1]
@@ -97,6 +108,36 @@ def _ensure_cache(robot: Robot) -> None:
         iterations=0,
         residual=0.0,
     )
+
+
+def set_nullspace(
+    *,
+    enabled: bool | None = None,
+    kq: float | None = None,
+    km: float | None = None,
+    ps: float | None = None,
+    pi: float | None = None,
+) -> None:
+    """Reconfigure IK null-space gains and invalidate the cached solver.
+
+    Intended for benchmarks / tests that need to toggle null-space at
+    runtime. Hot-path callers should instead set environment variables
+    before importing parol6.
+    """
+    global _cached_robot_id, _cached_solver
+    if enabled is not None:
+        _cfg.IK_NULLSPACE_ENABLED = enabled
+    if kq is not None:
+        _cfg.IK_NULLSPACE_KQ = kq
+    if km is not None:
+        _cfg.IK_NULLSPACE_KM = km
+    if ps is not None:
+        _cfg.IK_NULLSPACE_PS = ps
+    if pi is not None:
+        _cfg.IK_NULLSPACE_PI = pi
+    # Force _ensure_cache to rebuild on next solve_ik call.
+    _cached_robot_id = -1
+    _cached_solver = None
 
 
 @njit(cache=True)
