@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 from ruckig import InputParameter, OutputParameter, Result, Ruckig  # type: ignore[unresolved-import, ty:unresolved-import]
 
@@ -99,98 +100,68 @@ class ProfileType(Enum):
             return cls.TOPPRA
 
 
-# Threshold (radians) for detecting single-sample IK outliers in batch_ik
-# output. At wrist singularities (J5 ≈ 0) the IK has a 1-parameter family of
-# valid solutions; pinokin's LM picks one without continuity bias and can
-# return a sample whose joints are several degrees off the natural chain
-# even though FK matches. ~3° in joint norm catches the wrist-flip pattern
-# (J4 ±X / J6 ∓X) without false-positiving on legitimate sharp turns.
-_IK_OUTLIER_THRESHOLD_RAD: float = 0.0524  # ≈ 3°
+# Step is anomalous if its magnitude exceeds this multiple of the chain's
+# median step. Relative threshold keeps the rule invariant to sample density,
+# speed, and move type. Insensitive in [10, 20+]; real LM hops exceed 20×.
+_IK_OUTLIER_RATIO: float = 10.0
 
-# Number of "good" samples on each side of an outlier run to also re-interp.
-# Spreading the singular-region joint motion across more samples lowers
-# the residual velocity pulse TOPPRA produces (the patched samples otherwise
-# have ~15% steeper per-sample step than the surrounding chain).
-_IK_OUTLIER_PADDING: int = 8
-
-# Bookend / path-length ratio under which a run is treated as an LM outlier
-# (chain doubles back on itself). A near-1.0 ratio means the chain is
-# straight in joint space — legitimate fast motion, not an outlier. We've
-# seen ratios ~0.03 for true LM outliers vs. 1.0 for the legitimate fast
-# wrist motion at the start of sweeps from a singular pose.
-_IK_OUTLIER_RATIO: float = 0.5
+# Symmetric padding around each outlier run; absorbs LM seed-bleed into the
+# samples just after the hop. FK deviation scales linearly with pad.
+_IK_OUTLIER_PADDING: int = 4
 
 
+@njit(cache=True)
 def _smooth_singularity_outliers(positions: NDArray[np.float64]) -> int:
-    """In-place repair of IK-chain outlier runs from wrist-singularity branch hops.
+    """In-place repair of LM-IK branch hops near wrist singularities.
 
-    pinokin's LM IK has no continuity preference, so at wrist-singular poses
-    (J5 ≈ 0) it can pick an IK solution several degrees away from the natural
-    chain. Both single-sample and multi-sample outliers occur; both look like
-    a wrist flip in J4 / J6 since J4+J6 is the only invariant at the
-    singularity.
-
-    Algorithm:
-      1. Mark a sample "bad" if either adjacent step exceeds a joint-norm
-         threshold (catches the LM-picked off-branch samples).
-      2. For each contiguous run of bad samples, also pull in some good
-         samples on either side ("padding") and linear-interp the whole
-         expanded window. Padding spreads the necessary joint motion across
-         more samples so TOPPRA's time profile doesn't have to crank up
-         joint velocity locally — eliminates the residual velocity pulse
-         that pure run-replacement leaves behind.
-
-    The interp preserves the J4+J6 invariant exactly and gives sub-mm FK
-    error since both bookends lie on the cartesian path.
-
-    Returns the number of samples patched.
+    pinokin's LM picks IK solutions without a continuity preference, so at
+    J5 ≈ 0 it can jump several degrees off the natural chain in one or two
+    samples. Detected as steps > _IK_OUTLIER_RATIO × the chain's median
+    step; replaced by linear interpolation over the run plus padding.
     """
-    n = len(positions)
+    n = positions.shape[0]
+    dims = positions.shape[1]
     if n < 3:
         return 0
-    threshold = _IK_OUTLIER_THRESHOLD_RAD
-    pad = _IK_OUTLIER_PADDING
 
-    # Per-step joint-norm magnitudes
-    diffs = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+    diffs = np.empty(n - 1)
+    for i in range(n - 1):
+        s = 0.0
+        for c in range(dims):
+            v = positions[i + 1, c] - positions[i, c]
+            s += v * v
+        diffs[i] = np.sqrt(s)
 
-    # Mark a sample bad if either adjacent step is over threshold. Endpoints
-    # always treated as good (they're the IK seed / final target).
-    bad = np.zeros(n, dtype=bool)
-    bad[1:-1] = (diffs[:-1] > threshold) | (diffs[1:] > threshold)
+    median_step = np.median(diffs)
+    if median_step == 0.0:
+        return 0
+    threshold = _IK_OUTLIER_RATIO * median_step
 
     n_patched = 0
     i = 1
     while i < n - 1:
-        if not bad[i]:
+        if diffs[i - 1] <= threshold and diffs[i] <= threshold:
             i += 1
             continue
-        # Find end of run
         j = i
-        while j < n - 1 and bad[j]:
+        while j < n - 1 and (diffs[j - 1] > threshold or diffs[j] > threshold):
             j += 1
-        # Run is [i, j); bookended by good samples i-1 and j.
-        # Distinguish LM outlier ("out and back" jump) from legitimate fast
-        # joint motion: outliers have a small bookend distance vs. their
-        # intra-run path length, i.e. the chain doubles back on itself.
-        # Legitimate fast motion has bookend ≈ path length (ratio ≈ 1).
-        bookend_dq = float(np.linalg.norm(positions[j] - positions[i - 1]))
-        path_len = float(diffs[i - 1 : j].sum())
-        if path_len > 0 and (bookend_dq / path_len) < _IK_OUTLIER_RATIO:
-            # Treat as LM outlier — replace the run + padding with linear
-            # interp between bookends.
-            lo = max(1, i - pad)
-            hi = min(n - 1, j + pad)
-            run_span = hi - (lo - 1)
-            delta = positions[hi] - positions[lo - 1]
-            for k in range(lo, hi):
-                alpha = (k - (lo - 1)) / run_span
-                positions[k] = positions[lo - 1] + alpha * delta
-                n_patched += 1
-            i = hi + 1
-        else:
-            # Legitimate fast joint motion — leave it alone.
-            i = j + 1
+        lo = i - _IK_OUTLIER_PADDING
+        if lo < 1:
+            lo = 1
+        hi = j + _IK_OUTLIER_PADDING
+        if hi > n - 1:
+            hi = n - 1
+        span = hi - (lo - 1)
+        inv_span = 1.0 / span
+        for k in range(lo, hi):
+            alpha = (k - (lo - 1)) * inv_span
+            for c in range(dims):
+                positions[k, c] = positions[lo - 1, c] + alpha * (
+                    positions[hi, c] - positions[lo - 1, c]
+                )
+            n_patched += 1
+        i = hi + 1
     return n_patched
 
 
