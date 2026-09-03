@@ -10,9 +10,11 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
+import psutil
+from waldoctl import ActionState
 
 from parol6.ack_policy import AckPolicy
 from parol6.commands.base import (
@@ -29,9 +31,18 @@ from parol6.commands.system_commands import (
     StopCommand,
 )
 from parol6.commands.utility_commands import ResetStateCommand
-from parol6.server.command_executor import CommandExecutor, QueueFullError
-from parol6.server.motion_planner import MotionPlanner, PlanCommand
-from parol6.server.segment_player import SegmentPlayer
+from parol6.config import (
+    INTERVAL_S,
+    MAX_POLL_COUNT,
+    MCAST_GROUP,
+    MCAST_IF,
+    MCAST_PORT,
+    MCAST_TTL,
+    STATUS_BROADCAST_INTERVAL,
+    STATUS_RATE_HZ,
+    STATUS_STALE_S,
+    TRACE,
+)
 from parol6.protocol.wire import (
     CommandCode,
     ToolActionCmd,
@@ -40,18 +51,14 @@ from parol6.protocol.wire import (
     pack_ok_index,
     unpack_rx_frame_into,
 )
-from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
-from parol6.utils.error_codes import ErrorCode
+from parol6.server.async_logging import AsyncLogHandler
+from parol6.server.command_executor import CommandExecutor, QueueFullError
 from parol6.server.command_registry import (
     CommandCategory,
     create_command,
     create_command_from_struct,
     discover_commands,
 )
-from parol6.server.state import ControllerState, StateManager
-from waldoctl import ActionState
-from parol6.server.status_broadcast import StatusBroadcaster
-from parol6.server.async_logging import AsyncLogHandler
 from parol6.server.loop_timer import (
     EventRateMetrics,
     GCTracker,
@@ -59,24 +66,16 @@ from parol6.server.loop_timer import (
     PhaseTimer,
     format_hz_summary,
 )
+from parol6.server.motion_planner import MotionPlanner, PlanCommand
+from parol6.server.segment_player import SegmentPlayer
+from parol6.server.state import ControllerState, StateManager
+from parol6.server.status_broadcast import StatusBroadcaster
 from parol6.server.status_cache import close_cache, get_cache
 from parol6.server.transport_manager import TransportManager
 from parol6.server.transports.mock_serial_transport import MockSerialTransport
 from parol6.server.transports.udp_transport import UDPTransport
-from parol6.config import (
-    TRACE,
-    INTERVAL_S,
-    MAX_POLL_COUNT,
-    MCAST_GROUP,
-    MCAST_PORT,
-    MCAST_IF,
-    MCAST_TTL,
-    STATUS_RATE_HZ,
-    STATUS_STALE_S,
-    STATUS_BROADCAST_INTERVAL,
-)
-
-import psutil
+from parol6.utils.error_catalog import RobotError, extract_robot_error, make_error
+from parol6.utils.error_codes import ErrorCode
 
 logger = logging.getLogger("parol6.server.controller")
 
@@ -415,7 +414,11 @@ class Controller:
             raw_error = self._tool_cmd.robot_error or make_error(
                 ErrorCode.MOTN_TICK_FAILED, detail=type(self._tool_cmd).__name__
             )
-            state.error = replace(raw_error, command_index=self._tool_cmd_index)
+            # The refusal type is an exception now, not a dataclass, so
+            # re-attributing it is a rebuild from its own wire fields.
+            attributed = raw_error.to_wire()
+            attributed[0] = self._tool_cmd_index
+            state.error = RobotError.from_wire(attributed)
             state.action_state = ActionState.ERROR
             state.completed_command_index = max(
                 state.completed_command_index, self._tool_cmd_index
