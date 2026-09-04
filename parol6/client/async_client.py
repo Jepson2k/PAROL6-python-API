@@ -657,13 +657,18 @@ class AsyncRobotClient(_RobotClientABC):
     # --------------- Motion / Control ---------------
 
     async def home(
-        self, wait: bool = False, timeout: float = 60.0, **wait_kwargs: Any
+        self,
+        wait: bool = False,
+        calibrate: bool = False,
+        timeout: float = 60.0,
+        **wait_kwargs: Any,
     ) -> int:
         """Home the robot to its home position.
 
-        Unhomed, this runs the full referencing sequence (each joint seeks
-        its limit switch, then moves to standby). Already homed, it returns
-        to standby with a normal planned, collision-checked joint move.
+        Unhomed, or with ``calibrate=True``, this runs the full referencing
+        sequence (each joint seeks its limit switch, then moves to standby).
+        Already homed, it returns to standby with a normal planned,
+        collision-checked joint move.
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
@@ -674,9 +679,10 @@ class AsyncRobotClient(_RobotClientABC):
 
         Args:
             wait: If True, block until motion completes
+            calibrate: Re-run the referencing sequence even when already homed
             timeout: Maximum time to wait in seconds (only used when wait=True)
         """
-        index = await self._send(HomeCmd())
+        index = await self._send(HomeCmd(force=calibrate))
         assert isinstance(index, int)
         if wait and index >= 0:
             ok = await self.wait_command(index, timeout=timeout)

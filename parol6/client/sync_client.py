@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar, overload
 
-from waldoctl.tools import ToolSpec
+from waldoctl.sync_tools import SyncTool
 
 from waldoctl import PingResult, ToolStatus
 from waldoctl.status import ActivityResult, ToolResult
@@ -132,7 +132,7 @@ class RobotClient:
         # `from parol6 import RobotClient; rbt = RobotClient(...)` works without
         # going through Robot.create_sync_client(). The Robot factory rebinds
         # these afterwards from the same registry.
-        self._bound_tools: dict[str, ToolSpec] = {}
+        self._bound_tools: dict[str, SyncTool] = {}
         self._bind_default_tools()
 
     def _bind_default_tools(self) -> None:
@@ -147,7 +147,7 @@ class RobotClient:
     # ---------- tool access ----------
 
     @property
-    def tool(self) -> ToolSpec:
+    def tool(self) -> SyncTool:
         """Active bound tool. Raises if no tool has been set."""
         key = (self._inner._active_tool_key or "").upper()
         if not key:
@@ -175,20 +175,24 @@ class RobotClient:
 
     # ---------- motion / control ----------
 
-    def home(self, wait: bool = False, timeout: float = 60.0) -> int:
+    def home(
+        self, wait: bool = False, calibrate: bool = False, timeout: float = 60.0
+    ) -> int:
         """Home the robot to its home position.
 
-        Unhomed, this runs the full referencing sequence (each joint seeks
-        its limit switch, then moves to standby). Already homed, it returns
+        Unhomed, or with ``calibrate=True``, this runs the full referencing
+        sequence (each joint seeks its limit switch, then moves to
+        standby). Already homed, it returns
         to standby with a normal planned, collision-checked joint move.
 
         Returns the command index (≥ 0) on success, -1 on failure.
 
         Args:
             wait: If True, block until motion completes.
+            calibrate: Re-run the referencing sequence even when already homed.
             timeout: Maximum time to wait in seconds (only used when wait=True).
         """
-        return _run(self._inner.home(wait=wait, timeout=timeout))
+        return _run(self._inner.home(wait=wait, calibrate=calibrate, timeout=timeout))
 
     def teleport(
         self,

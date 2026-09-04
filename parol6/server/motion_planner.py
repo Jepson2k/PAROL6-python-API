@@ -236,7 +236,11 @@ class TrajectoryPlanner:
         # Fast-path home: an already-referenced robot returns to the standby
         # pose with a normal planned (collision-checked) joint move instead
         # of re-running the firmware switch-seek.
-        if isinstance(params, HomeCmd) and bool(self.state.Homed_in[:6].all()):
+        if (
+            isinstance(params, HomeCmd)
+            and not params.force
+            and bool(self.state.Homed_in[:6].all())
+        ):
             params = MoveJCmd(angles=self._home_deg, speed=self._home_return_speed)
 
         cmd_class = self._registry.get_command_for_struct(type(params))

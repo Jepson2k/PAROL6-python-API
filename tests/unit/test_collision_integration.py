@@ -250,7 +250,7 @@ def test_decode_gate_rejects_malformed_wire():
         ("box", [0.1] * 3, [0, 0, float("nan"), 0, 0, 0], True, None, "b"),
         ("box", [0.1] * 3, [0, 0, 0, 0, 0], True, None, "b"),  # short pose
         ("box", [0.1] * 3, [0, 0, 0, 0, 0, 0], True, -0.01, "b"),  # neg margin
-        ("plane", [0, 0, 0, 0.5], [0, 0, 0, 0, 0, 0], True, None, "b"),  # 0 normal
+        ("plane", [0, 0, 1, 0.5], [0, 0, 0, 0, 0, 0], True, None, "b"),  # kind gone
     ]
     for wire in bad_wires:
         with pytest.raises(ValueError):

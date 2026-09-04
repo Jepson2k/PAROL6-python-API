@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 def _enc_hook(obj: object) -> object:
     """Custom encoder hook for numpy types."""
     if isinstance(obj, np.ndarray):
-        return obj.tolist()  # type: ignore[no-matching-overload, ty:no-matching-overload]
+        return obj.tolist()  # type: ignore[no-matching-overload]
     if isinstance(obj, (np.integer, np.floating)):
         return obj.item()
     raise NotImplementedError(f"Cannot encode {type(obj)}")
@@ -500,9 +500,13 @@ class JogLCmd(
 class HomeCmd(
     msgspec.Struct, tag=int(CmdType.HOME), array_like=True, frozen=True, gc=False
 ):
-    """HOME: [CmdType.HOME]"""
+    """HOME: [CmdType.HOME, force]
 
-    pass
+    ``force`` re-runs the firmware referencing sequence on an already
+    homed arm instead of the planned return to standby.
+    """
+
+    force: bool = False
 
 
 class ResetCmd(
