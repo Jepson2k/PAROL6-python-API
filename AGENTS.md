@@ -1,6 +1,4 @@
-# AGENTS.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# AGENTS.md - PAROL6 Python API
 
 ## Project Overview
 
@@ -35,7 +33,7 @@ PAROL6 Python API is a lightweight client and controller for PAROL6 6-DOF robot 
 
 ```bash
 # Development setup
-pip install -e .[dev]
+pip install -e ".[dev]"
 pre-commit install
 
 # Linting & formatting
@@ -50,10 +48,16 @@ pre-commit run -a
 pytest
 
 # Run specific test file
-pytest tests/unit/test_wire.py -v
+pytest tests/unit/test_wire_pack.py -v
 ```
 
-**IMPORTANT: Do NOT prefix `pytest` commands with environment variables like `PAROL6_FAKE_SERIAL=1 pytest ...`. The conftest.py already configures `PAROL6_FAKE_SERIAL=1`. Just run `pytest` directly.**
+**Do NOT prefix `pytest` commands with environment variables like
+`PAROL6_FAKE_SERIAL=1 pytest ...`.** conftest.py passes `PAROL6_FAKE_SERIAL=1`
+to the controller subprocess the `robot_server` fixture spawns, so any test
+that reaches the controller through a fixture runs on the simulator. It is not
+set in the pytest process itself: an in-process transport test that does not
+use those fixtures has to set simulator mode itself, or it will try to open
+real serial hardware.
 
 ## Controller CLI
 
