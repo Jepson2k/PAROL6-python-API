@@ -83,6 +83,7 @@ class ProfileType(Enum):
     TOPPRA = "toppra"  # Time-optimal path following (default)
     RUCKIG = "ruckig"  # Point-to-point jerk-limited (can't follow Cartesian paths)
     QUINTIC = "quintic"  # Quintic polynomial (C² smooth, predictable shape)
+    SEPTIC = "septic"  # Septic polynomial (C³ smooth: jerk also zero at the ends)
     TRAPEZOID = "trapezoid"  # Trapezoidal velocity profile
     LINEAR = "linear"  # Direct linear interpolation (no smoothing)
 
@@ -107,6 +108,12 @@ _IK_OUTLIER_RATIO: float = 10.0
 # Symmetric padding around each outlier run; absorbs LM seed-bleed into the
 # samples just after the hop. FK deviation scales linearly with pad.
 _IK_OUTLIER_PADDING: int = 4
+
+# Peaks of the unit septic s(u) = 35u⁴ − 84u⁵ + 70u⁶ − 20u⁷ on u ∈ [0, 1]:
+# ds/du and |d³s/du³| at u = 1/2, |d²s/du²| at u = (5 ∓ √5)/10.
+_SEPTIC_PEAK_VEL: float = 35.0 / 16.0
+_SEPTIC_PEAK_ACC: float = 84.0 * float(np.sqrt(5.0)) / 25.0
+_SEPTIC_PEAK_JERK: float = 52.5
 
 
 @njit(cache=True)
@@ -485,6 +492,8 @@ class TrajectoryBuilder:
             return self._build_simple_trajectory()
         elif self.profile == ProfileType.QUINTIC:
             return self._build_quintic_trajectory()
+        elif self.profile == ProfileType.SEPTIC:
+            return self._build_septic_trajectory()
         elif self.profile == ProfileType.TRAPEZOID:
             return self._build_trapezoid_trajectory()
         else:
@@ -948,6 +957,45 @@ class TrajectoryBuilder:
             profile_s[i] = traj(float(times[i]))[0]
 
         trajectory_rad = self.joint_path.sample_many(profile_s)
+
+        trajectory_rad, duration = self._enforce_segment_limits(
+            trajectory_rad, duration
+        )
+
+        steps = _rad_to_steps_alloc(trajectory_rad)
+
+        return Trajectory(steps=steps, duration=duration, positions_rad=trajectory_rad)
+
+    def _build_septic_trajectory(self) -> Trajectory:
+        """
+        Build trajectory with a septic polynomial on the path coordinate.
+
+        Velocity, acceleration and jerk are all zero at both ends, so unlike
+        the quintic the move neither starts nor stops with a jerk step. One
+        scalar profile times the whole path, joint and Cartesian alike, so
+        every joint arrives together and a joint move stays on its straight
+        joint-space line.
+        """
+        positions = self.joint_path.positions
+        # Steepest dq/ds of each joint over the path's segments. A joint move
+        # has one slope, its displacement; a Cartesian path bends in joint
+        # space, and its steepest segment is what the limits have to cover.
+        slope = np.max(np.abs(np.diff(positions, axis=0)), axis=0) * (
+            len(positions) - 1
+        )
+        duration = max(
+            float(np.max(_SEPTIC_PEAK_VEL * slope / self.v_max)),
+            float(np.max(np.sqrt(_SEPTIC_PEAK_ACC * slope / self.a_max))),
+            float(np.max(np.cbrt(_SEPTIC_PEAK_JERK * slope / self.j_max))),
+            self.duration or 0.0,
+            self.dt * 2,
+        )
+        # A whole number of ticks, so the samples land one control period apart.
+        n_ticks = int(np.ceil(duration / self.dt - 1e-9))
+        duration = n_ticks * self.dt
+        u = np.linspace(0.0, 1.0, n_ticks + 1)
+        s = u**4 * (35.0 - 84.0 * u + 70.0 * u**2 - 20.0 * u**3)
+        trajectory_rad = self.joint_path.sample_many(s)
 
         trajectory_rad, duration = self._enforce_segment_limits(
             trajectory_rad, duration
